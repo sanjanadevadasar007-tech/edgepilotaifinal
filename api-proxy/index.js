@@ -4,7 +4,10 @@ const app = express();
 const ROUTES = new Map([
   ['/api/health', 'GET'],
   ['/api/recommend', 'POST'],
+  ['/api/explain', 'POST'],
   ['/api/simulate', 'POST'],
+  ['/api/counterfactuals', 'POST'],
+  ['/api/optimize', 'POST'],
   ['/api/report', 'POST'],
 ]);
 
