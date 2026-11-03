@@ -35,6 +35,24 @@ export async function simulateWorkload(workload, changes) {
   return response.json();
 }
 
+export async function getCounterfactuals(workload, options = {}) {
+  const response = await request(`${API_BASE}/counterfactuals`, {
+    method: 'POST',
+    headers: REQUEST_HEADERS,
+    body: JSON.stringify({ workload, ...options }),
+  }, 'Counterfactual analysis service');
+  return response.json();
+}
+
+export async function getOptimization(workload) {
+  const response = await request(`${API_BASE}/optimize`, {
+    method: 'POST',
+    headers: REQUEST_HEADERS,
+    body: JSON.stringify({ workload }),
+  }, 'Optimization service');
+  return response.json();
+}
+
 export async function getRecommendationReport(workload) {
   const response = await request(`${API_BASE}/report`, {
     method: 'POST',

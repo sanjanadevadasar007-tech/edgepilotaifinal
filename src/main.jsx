@@ -2,6 +2,8 @@ import { Component, lazy, Suspense, useEffect, useLayoutEffect, useRef, useState
 import { createRoot } from 'react-dom/client';
 import {
   checkBackendHealth,
+  getCounterfactuals,
+  getOptimization,
   getRecommendation,
   getRecommendationReport,
   simulateWorkload,
@@ -672,6 +674,7 @@ function Analyzer({ workload, setWorkload, onAnalyze, busy }) {
   const [modelRamRequiredMb, setModelRamRequiredMb] = useState('');
   const [deviceAvailableRamMb, setDeviceAvailableRamMb] = useState('');
   const [benchmarkProfile, setBenchmarkProfile] = useState('');
+  const [allowRemoteProcessing, setAllowRemoteProcessing] = useState(false);
 
   function updateWorkload(event) {
     const { name, value } = event.target;
@@ -704,6 +707,7 @@ function Analyzer({ workload, setWorkload, onAnalyze, busy }) {
       budget_monthly: budget,
       privacy_requirement: workload.privacy_requirement,
       criticality: workload.criticality,
+      allow_remote_processing: allowRemoteProcessing,
       ...(applicationTypeValue ? { application_type: applicationTypeValue } : {}),
       ...(modelRamRequiredMb !== '' ? { model_ram_required_mb: Number(modelRamRequiredMb) } : {}),
       ...(deviceAvailableRamMb !== '' ? { device_available_ram_mb: Number(deviceAvailableRamMb) } : {}),
@@ -854,6 +858,19 @@ function Analyzer({ workload, setWorkload, onAnalyze, busy }) {
           <p className="technical-note">
             RAM values are optional and inform on-device memory feasibility. They are not inferred from parameter count.
           </p>
+          <label className="remote-processing-option">
+            <input
+              type="checkbox"
+              checked={allowRemoteProcessing}
+              onChange={(event) => setAllowRemoteProcessing(event.target.checked)}
+            />
+            <span>
+              <strong>Allow remote processing</strong>
+              <small>
+                Lets the engine evaluate hybrid options that send permitted work remotely. This does not guarantee a hybrid proposal.
+              </small>
+            </span>
+          </label>
         </fieldset>
         <fieldset className="optional-fields benchmark-profile-fields">
           <legend>Optional Qualcomm inference benchmark match</legend>
@@ -869,7 +886,7 @@ function Analyzer({ workload, setWorkload, onAnalyze, busy }) {
               <option value="mobilenetS24">MobileNet V2 · Galaxy S24 · ONNX Runtime · W8A8</option>
             </select>
             <small>
-              Only exact profile matches are returned. Inference latency is not end-to-end latency.
+              Only exact profile matches are returned. Inference latency is not end-to-end latency. The Galaxy S25 profile can also match illustrative cost curves.
             </small>
           </label>
         </fieldset>
@@ -1101,6 +1118,330 @@ function InfoCard({ title, items, emptyMessage }) {
   );
 }
 
+function ParetoPlot({ pareto, feasibility, slaChecks }) {
+  const entries = Object.entries(isRecord(pareto?.compared_tiers) ? pareto.compared_tiers : {})
+    .map(([tier, metrics]) => ({ tier, ...metrics }))
+    .filter((entry) =>
+      entry.end_to_end_latency_ms !== null
+      && entry.end_to_end_latency_ms !== undefined
+      && entry.monthly_cost_inr !== null
+      && entry.monthly_cost_inr !== undefined
+      && Number.isFinite(Number(entry.end_to_end_latency_ms))
+      && Number.isFinite(Number(entry.monthly_cost_inr)));
+  const frontier = new Set(Array.isArray(pareto?.non_dominated_tiers) ? pareto.non_dominated_tiers : []);
+  const maxLatency = Math.max(1, ...entries.map((entry) => Number(entry.end_to_end_latency_ms)));
+  const maxCost = Math.max(1, ...entries.map((entry) => Number(entry.monthly_cost_inr)));
+  const plot = { left: 80, right: 585, top: 34, bottom: 246 };
+  const x = (latency) => plot.left + (Number(latency) / maxLatency) * (plot.right - plot.left);
+  const y = (cost) => plot.bottom - (Number(cost) / maxCost) * (plot.bottom - plot.top);
+  const numberLabel = (value) => Number(value).toLocaleString(undefined, { maximumFractionDigits: 1 });
+  const eligibleCount = entries.filter(
+    (entry) => feasibility?.[normalizeTierKey(entry.tier)]?.eligible === true,
+  ).length;
+  const provisionalLatencyOverruns = entries.filter(
+    (entry) => slaChecks?.[entry.tier]?.latency_status === 'provisional_fail',
+  ).length;
+
+  return (
+    <figure className="insight-chart">
+      {entries.length >= 2 ? (
+        <>
+        <div className="pareto-chart-viewport" tabIndex="0" aria-label="Scrollable Pareto trade-off chart">
+        <svg className="pareto-chart-svg" viewBox="0 0 660 318" role="img" aria-label="Pareto chart comparing end-to-end latency and estimated monthly cost for compared tiers">
+          {[0, 1, 2, 3, 4].map((step) => {
+            const gridY = plot.bottom - step * (plot.bottom - plot.top) / 4;
+            const gridX = plot.left + step * (plot.right - plot.left) / 4;
+            return (
+              <g key={step}>
+                <line className="chart-grid-line" x1={plot.left} y1={gridY} x2={plot.right} y2={gridY} />
+                <line className="chart-grid-line" x1={gridX} y1={plot.top} x2={gridX} y2={plot.bottom} />
+                <text className="chart-tick" x={plot.left - 9} y={gridY + 3} textAnchor="end">
+                  {numberLabel(maxCost * step / 4)}
+                </text>
+                <text className="chart-tick" x={gridX} y={plot.bottom + 17} textAnchor="middle">
+                  {numberLabel(maxLatency * step / 4)}
+                </text>
+              </g>
+            );
+          })}
+          <line className="chart-axis" x1={plot.left} y1={plot.top} x2={plot.left} y2={plot.bottom} />
+          <line className="chart-axis" x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.bottom} />
+          <text className="chart-axis-label chart-x-axis-label" x="332" y="299" textAnchor="middle">End-to-end latency (ms)</text>
+          <text className="chart-axis-label" transform="translate(17 140) rotate(-90)" textAnchor="middle">Estimated monthly cost (INR)</text>
+          {entries.map((entry) => {
+            const isFrontier = frontier.has(entry.tier);
+            const key = normalizeTierKey(entry.tier);
+            const latencyStatus = slaChecks?.[key]?.latency_status;
+            const targetStatus = latencyStatus === 'provisional_fail'
+              ? 'Estimated latency provisionally exceeds the target'
+              : latencyStatus === 'fail'
+                ? 'Measured latency exceeds the target'
+                : latencyStatus === 'provisional_pass'
+                  ? 'Estimated latency provisionally meets the target'
+                  : latencyStatus === 'pass'
+                    ? 'Measured latency meets the target'
+                    : 'Latency target status unavailable';
+            const eligibility = feasibility?.[key]?.eligible === true
+              ? 'Eligible for ranking'
+              : feasibility?.[key]?.eligible === false
+                ? `Not eligible: ${(feasibility[key].reasons || []).join('; ') || 'backend marked ineligible'}`
+                : 'Eligibility status unavailable';
+            const evidenceType = `Latency evidence: ${entry.latency_source || 'unknown'}; cost evidence: ${entry.cost_source || 'unknown'}`;
+            const title = `${formatTierName(entry.tier)}: ${numberLabel(entry.end_to_end_latency_ms)} ms end-to-end latency, INR ${numberLabel(entry.monthly_cost_inr)} monthly cost. ${evidenceType}. ${isFrontier ? 'Pareto-optimal (non-dominated).' : 'Dominated.'} ${eligibility}. ${targetStatus}.`;
+            return (
+              <g key={entry.tier} className={`chart-point ${isFrontier ? 'is-frontier' : 'is-dominated'}`}>
+                <title>{title}</title>
+                {isFrontier
+                  ? <circle cx={x(entry.end_to_end_latency_ms)} cy={y(entry.monthly_cost_inr)} r="7" />
+                  : <rect x={x(entry.end_to_end_latency_ms) - 5} y={y(entry.monthly_cost_inr) - 5} width="10" height="10" />}
+                <text x={x(entry.end_to_end_latency_ms) + 10} y={y(entry.monthly_cost_inr) - 8}>
+                  {formatTierName(entry.tier)}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+        </div>
+        {entries.length >= 2 && (
+          <>
+            <p className="chart-scroll-note">Swipe horizontally to inspect all tiers and latency values.</p>
+            <p className="chart-x-axis-mobile">End-to-end latency (ms)</p>
+          </>
+        )}
+        </>
+      ) : (
+        <div className="insight-empty-visual" role="status">
+          <i /><i /><i /><span>Need two comparable tiers</span>
+        </div>
+      )}
+      {entries.length >= 2 && (
+        <div className="pareto-chart-legend" aria-label="Chart legend">
+          <span><i className="is-frontier" /> Pareto-optimal (non-dominated)</span>
+          <span><i className="is-dominated" /> Dominated</span>
+          <span>{eligibleCount} of {entries.length} compared tiers eligible for ranking</span>
+          {provisionalLatencyOverruns > 0 && (
+            <span>{provisionalLatencyOverruns} tier(s) provisionally exceed the estimated latency target</span>
+          )}
+        </div>
+      )}
+      <figcaption>
+        {entries.length >= 2
+          ? `${entries.length} tiers with cost and latency evidence plotted. Pareto status compares only these values; eligibility and provisional target checks are shown separately.`
+          : 'A Pareto comparison needs at least two tiers with both latency and cost data.'}
+      </figcaption>
+    </figure>
+  );
+}
+
+function BreakEvenVisual({ analysis, feasibility }) {
+  const costs = isRecord(analysis?.estimated_cost_at_reference_inr)
+    ? Object.entries(analysis.estimated_cost_at_reference_inr)
+      .filter(([, value]) => value !== null && value !== undefined && Number.isFinite(Number(value)))
+    : [];
+  const crossings = Array.isArray(analysis?.pairwise_break_even_points)
+    ? analysis.pairwise_break_even_points
+    : [];
+  const highestCost = Math.max(1, ...costs.map(([, value]) => Number(value)));
+  const maxRequests = Math.max(
+    Number(analysis?.reference_monthly_requests) || 0,
+    ...crossings.map((item) => Number(item.valid_volume_range?.[1] ?? item.monthly_requests) || 0),
+    1,
+  );
+  const curvesUsed = isRecord(analysis?.curves_used) ? analysis.curves_used : {};
+  const unavailableTierReasons = Array.isArray(analysis?.unavailable_at_reference)
+    ? analysis.unavailable_at_reference
+      .filter((tier) => feasibility?.[normalizeTierKey(tier)]?.eligible === false)
+      .map((tier) => {
+        const reasons = feasibility[normalizeTierKey(tier)]?.reasons;
+        const reasonText = Array.isArray(reasons) && reasons.length > 0
+          ? reasons.join('; ').replace(/[.]+$/, '')
+          : 'not eligible for this workload';
+        return `${formatTierName(tier)}: ${reasonText}`;
+      })
+    : [];
+  const unavailableMessage = analysis?.status === 'not_available'
+    ? analysis.reason || 'No workload-matched cost-curve evidence was returned.'
+    : analysis?.status === 'insufficient_curves'
+      ? `Only ${Object.keys(curvesUsed).length} eligible tier${Object.keys(curvesUsed).length === 1 ? '' : 's'} had usable cost curves; at least two are required to calculate a crossover.${unavailableTierReasons.length > 0 ? ` Excluded tiers: ${unavailableTierReasons.join('. ')}.` : ''}`
+      : crossings.length === 0
+        ? 'No pairwise cost-curve crossover was returned within the available volume ranges.'
+        : 'No break-even point was returned by the backend.';
+
+  return (
+    <div className="breakeven-visual">
+      {costs.length > 0 && (
+        <div className="reference-cost-chart" role="img" aria-label="Modeled monthly cost at the reference usage volume">
+          <p>Modeled monthly cost at {Number(analysis.reference_monthly_requests).toLocaleString()} requests</p>
+          {costs.map(([tier, value]) => (
+            <div className="reference-cost-row" key={tier}>
+              <span>{formatTierName(tier)}</span>
+              <div className="reference-cost-track">
+                <i style={{ width: `${Math.max(3, Number(value) / highestCost * 100)}%` }} />
+              </div>
+              <strong>₹{Number(value).toLocaleString()}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+      {crossings.length > 0 ? (
+        <div className="break-even-chart" role="img" aria-label="Modeled request volumes where pairs of tier cost curves cross">
+          <p>Modeled cost crossover by monthly request volume</p>
+          <div className="break-even-axis"><span>0</span><span>{maxRequests.toLocaleString()} requests</span></div>
+          {crossings.map((point, index) => (
+            <div className="break-even-point-row" key={`${point.tiers?.join('-')}-${point.monthly_requests}-${index}`}>
+              <span>{point.tiers?.map(formatTierName).join(' ↔ ') || 'Tier crossover'}</span>
+              <div className="break-even-track">
+                <i style={{ left: `${Math.min(100, Number(point.monthly_requests) / maxRequests * 100)}%` }} />
+              </div>
+              <strong>{Number(point.monthly_requests).toLocaleString()} / mo</strong>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="insight-empty-visual is-compact" role="status">
+          <span>{unavailableMessage}</span>
+        </div>
+      )}
+      {Object.keys(curvesUsed).length > 0 && (
+        <details className="insight-footnote">
+          <summary>Cost curve sources and assumptions</summary>
+          <ul>
+            {Object.entries(curvesUsed).map(([tier, curve]) => (
+              <li key={tier}>
+                <strong>{formatTierName(tier)} — {curve.source || 'source unavailable'}:</strong>{' '}
+                {curve.source_reference || 'Source reference unavailable.'}{' '}
+                {Array.isArray(curve.valid_volume_range) && (
+                  <>Valid for {curve.valid_volume_range[0]}–{curve.valid_volume_range[1]} requests/month. </>
+                )}
+                {Array.isArray(curve.assumptions) && curve.assumptions.join(' ')}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      <p className="insight-caption">
+        {analysis?.note || analysis?.reason || 'These are modeled costs, not provider quotes or guaranteed savings.'}
+      </p>
+    </div>
+  );
+}
+
+function HybridFlow({ hybrid }) {
+  if (!Array.isArray(hybrid?.nodes) || hybrid.nodes.length === 0) {
+    const reasons = Array.isArray(hybrid?.reasons) ? hybrid.reasons : [];
+    return (
+      <div className="hybrid-unavailable">
+        <span className="hybrid-status-orbit" aria-hidden="true">×</span>
+        <div>
+          <strong>Hybrid path not proposed</strong>
+          {reasons.map((reason) => <p key={reason}>{reason}</p>)}
+        </div>
+      </div>
+    );
+  }
+  const nodes = hybrid.nodes;
+  const connections = Array.isArray(hybrid.connections) ? hybrid.connections : [];
+  const critical = new Set(hybrid.critical_path || []);
+  const optional = new Set(hybrid.optional_remote_path || []);
+
+  return (
+    <>
+      <div className="hybrid-flow" role="img" aria-label="Proposed hybrid architecture flow from local device processing to optional remote analytics">
+        {nodes.map((node, index) => {
+          const next = nodes[index + 1];
+          const connection = connections.find((edge) => edge.source === node.id && edge.target === next?.id);
+          const isCritical = critical.has(node.id);
+          const isOptional = optional.has(node.id);
+          return (
+            <div className="hybrid-flow-step" key={node.id}>
+              <div className={`hybrid-node ${isCritical ? 'is-critical' : ''} ${isOptional ? 'is-optional' : ''}`}>
+                <span className="hybrid-node-glyph" aria-hidden="true">
+                  {node.type === 'cloud' ? '☁' : node.type === 'edge' ? '⌁' : '▣'}
+                </span>
+                <strong>{node.label}</strong>
+                <small>{String(node.role || '').replaceAll('_', ' ')}</small>
+              </div>
+              {next && (
+                <div className={`hybrid-connector ${connection ? 'has-connection' : ''}`}>
+                  <i aria-hidden="true">→</i>
+                  {connection?.data && <small>{connection.data}</small>}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div className="hybrid-legend">
+        <span><i className="is-critical" /> Critical local path</span>
+        <span><i className="is-optional" /> Optional remote path</span>
+        {hybrid.remote_analytics_tier && <strong>Remote: {formatTierName(hybrid.remote_analytics_tier)}</strong>}
+      </div>
+      {Array.isArray(hybrid.validation_checks) && hybrid.validation_checks.length > 0 && (
+        <details className="hybrid-checks">
+          <summary>Validation checklist <span>{hybrid.validation_checks.length} checks</span></summary>
+          <ul>{hybrid.validation_checks.map((check) => <li key={check}>{check}</li>)}</ul>
+        </details>
+      )}
+      <p className="insight-caption">{hybrid.basis || 'Candidate architecture only; it is not a fifth deployment tier.'}</p>
+    </>
+  );
+}
+
+function ReliabilitySummary({ audit, evidenceGaps }) {
+  if (!isRecord(audit)) {
+    return <p className="insight-caption">No audit result was returned by the backend.</p>;
+  }
+  const statusLabels = {
+    pass: 'Checks passed',
+    pass_with_caveats: 'Passed with caveats',
+    fail: 'Checks failed',
+  };
+  const categories = Array.isArray(audit.check_categories) ? audit.check_categories : [];
+
+  return (
+    <>
+      <div className={`reliability-status is-${audit.status || 'unknown'}`}>
+        <span aria-hidden="true">{audit.status === 'fail' ? '!' : '✓'}</span>
+        <div>
+          <strong>{statusLabels[audit.status] || 'Audit status unavailable'}</strong>
+          <small>{audit.method || 'Internal consistency audit'}</small>
+        </div>
+      </div>
+      <div className="audit-category-list" aria-label="Audit check categories">
+        {categories.map((category) => (
+          <span key={category}><i aria-hidden="true" />{category.replaceAll('_', ' ')}</span>
+        ))}
+      </div>
+      {Array.isArray(audit.errors) && audit.errors.length > 0 && (
+        <ul className="audit-findings is-error">{audit.errors.map((item) => <li key={item}>{item}</li>)}</ul>
+      )}
+      {Array.isArray(audit.warnings) && audit.warnings.length > 0 && (
+        <ul className="audit-findings">{audit.warnings.map((item) => <li key={item}>{item}</li>)}</ul>
+      )}
+      {isRecord(evidenceGaps) && Object.keys(evidenceGaps).length > 0 && (
+        <details className="insight-footnote">
+          <summary>Evidence limitations by tier</summary>
+          <ul>
+            {Object.entries(evidenceGaps).map(([tier, gaps]) => (
+              <li key={tier}>
+                <strong>{formatTierName(tier)}:</strong>{' '}
+                {Array.isArray(gaps)
+                  ? gaps.join(' ')
+                  : typeof gaps === 'string'
+                    ? gaps
+                    : 'Evidence details unavailable.'}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      <p className="audit-scope">
+        {audit.audit_scope || 'Internal decision consistency audit only.'} It does not guarantee real-world deployment performance or independently verify measurements.
+      </p>
+    </>
+  );
+}
+
 function Results({
   resultData,
   resultSource,
@@ -1129,6 +1470,14 @@ function Results({
   const [scenarioDeviceRam, setScenarioDeviceRam] = useState(
     baselineDeviceRam == null ? '' : String(baselineDeviceRam),
   );
+  const [counterfactualTarget, setCounterfactualTarget] = useState('');
+  const [counterfactualData, setCounterfactualData] = useState(null);
+  const [counterfactualLoading, setCounterfactualLoading] = useState(false);
+  const [counterfactualError, setCounterfactualError] = useState('');
+  const [optimizationData, setOptimizationData] = useState(null);
+  const [optimizationLoading, setOptimizationLoading] = useState(false);
+  const [optimizationError, setOptimizationError] = useState('');
+  const [selectedCounterfactual, setSelectedCounterfactual] = useState(0);
   useEffect(() => {
     setScenarioLatency(baselineLatency);
     setScenarioPrivacy(baselinePrivacy ?? 'medium');
@@ -1137,6 +1486,14 @@ function Results({
     );
     setScenarioDeviceRam(baselineDeviceRam == null ? '' : String(baselineDeviceRam));
   }, [baselineLatency, baselinePrivacy, baselineNetworkAvailable, baselineDeviceRam]);
+  useEffect(() => {
+    setCounterfactualData(null);
+    setCounterfactualError('');
+    setCounterfactualTarget('');
+    setOptimizationData(null);
+    setOptimizationError('');
+    setSelectedCounterfactual(0);
+  }, [resultData]);
   const hasResult = resultSource !== null;
   const hasLiveResult = resultSource === 'live';
   const result = isRecord(resultData)
@@ -1165,6 +1522,12 @@ function Results({
   const scores = readScores(result, resultSource === 'mock');
   const resultDetails = isRecord(result.details) ? result.details : {};
   const benchmark = isRecord(resultDetails.benchmark) ? resultDetails.benchmark : null;
+  const detailedResult = isRecord(optimizationData?.details) ? optimizationData.details : resultDetails;
+  const optimization = isRecord(detailedResult.optimization) ? detailedResult.optimization : null;
+  const reliability = isRecord(detailedResult.reliability) ? detailedResult.reliability : null;
+  const evidenceGaps = isRecord(detailedResult.evidence_gaps) ? detailedResult.evidence_gaps : null;
+  const feasibility = isRecord(detailedResult.feasibility) ? detailedResult.feasibility : {};
+  const slaChecks = isRecord(detailedResult.sla_checks) ? detailedResult.sla_checks : {};
   const comparison =
     isRecord(simulationResponse?.comparison)
       ? simulationResponse.comparison
@@ -1263,6 +1626,75 @@ function Results({
     : hasLiveResult
       ? 'NOT RETURNED'
       : 'NOT REQUESTED';
+  const counterfactualFields = [
+    'latency_requirement_ms',
+    'privacy_requirement',
+    ...(hasModelRamRequirement ? ['device_available_ram_mb'] : []),
+  ];
+  const counterfactualFlips = Array.isArray(counterfactualData?.flips)
+    ? counterfactualData.flips.filter(isRecord)
+    : [];
+  const counterfactualTierSwitchCount = counterfactualFlips.filter(
+    (flip) => typeof flip.to_tier === 'string' && flip.to_tier.trim() !== '',
+  ).length;
+  const counterfactualNoFeasibleCount = counterfactualFlips.filter(
+    (flip) => flip.to_tier === null,
+  ).length;
+  const counterfactualUnavailableDestinationCount = counterfactualFlips.filter(
+    (flip) => flip.to_tier !== null
+      && (typeof flip.to_tier !== 'string' || flip.to_tier.trim() === ''),
+  ).length;
+  const selectedFlip = counterfactualFlips[selectedCounterfactual] || null;
+  const formatCounterfactualDestination = (tier) => (
+    tier === null
+      ? 'No feasible tier'
+      : typeof tier === 'string' && tier.trim()
+        ? formatTierName(tier)
+        : 'Destination unavailable'
+  );
+
+  async function runCounterfactuals() {
+    if (!reportWorkload || !hasLiveResult) return;
+    setCounterfactualLoading(true);
+    setCounterfactualError('');
+    setCounterfactualData(null);
+    setSelectedCounterfactual(0);
+    try {
+      const responseData = await getCounterfactuals(reportWorkload, {
+        fields: counterfactualFields,
+        target_tier: counterfactualTarget || null,
+        max_evaluations: 60,
+        max_results: 30,
+      });
+      setCounterfactualData(responseData);
+    } catch (requestError) {
+      setCounterfactualError(
+        requestError instanceof Error && requestError.message
+          ? requestError.message
+          : 'Counterfactual analysis failed.',
+      );
+    } finally {
+      setCounterfactualLoading(false);
+    }
+  }
+
+  async function runOptimization() {
+    if (!reportWorkload || !hasLiveResult) return;
+    setOptimizationLoading(true);
+    setOptimizationError('');
+    try {
+      const responseData = await getOptimization(reportWorkload);
+      setOptimizationData(responseData);
+    } catch (requestError) {
+      setOptimizationError(
+        requestError instanceof Error && requestError.message
+          ? requestError.message
+          : 'Optimization analysis failed.',
+      );
+    } finally {
+      setOptimizationLoading(false);
+    }
+  }
 
   return (
     <main className="page results-page">
@@ -1579,6 +2011,212 @@ function Results({
               )}
             </section>
           )}
+          <section className="advanced-insights" aria-labelledby="advanced-insights-title">
+            <div className="advanced-insights-heading">
+              <div>
+                <p className="technical-label">DECISION LAB · OPTIONAL ANALYSES</p>
+                <h2 id="advanced-insights-title">See the trade-offs behind the route.</h2>
+                <p>Explore alternatives and evidence without changing the service recommendation above.</p>
+                {optimizationError && <p className="insight-error" role="alert">{optimizationError}</p>}
+              </div>
+              <div className="advanced-insights-actions">
+                <span className="insight-orbit" aria-hidden="true"><i /><i /><i /></span>
+                <button
+                  className="button button-outline"
+                  type="button"
+                  onClick={runOptimization}
+                  disabled={!hasLiveResult || optimizationLoading}
+                >
+                  {optimizationLoading ? 'Updating analysis…' : optimization ? 'Refresh analysis' : 'Load trade-off analysis'}
+                </button>
+              </div>
+            </div>
+
+            <div className="advanced-insight-grid">
+              <article className="advanced-insight-card panel counterfactual-card">
+                <div className="insight-card-heading">
+                  <span className="insight-index">01</span>
+                  <div>
+                    <p className="technical-label">COUNTERFACTUAL</p>
+                    <h3>What could change the winner?</h3>
+                  </div>
+                </div>
+                <p className="insight-card-intro">Find sampled input changes that switch tiers or leave no tier feasible.</p>
+                <div className="counterfactual-controls">
+                  <label htmlFor="counterfactual-target">Look for a path to</label>
+                  <select
+                    id="counterfactual-target"
+                    value={counterfactualTarget}
+                    onChange={(event) => setCounterfactualTarget(event.target.value)}
+                    disabled={counterfactualLoading || !hasLiveResult}
+                  >
+                    <option value="">Any different tier</option>
+                    {TIERS.map((tier) => <option key={tier} value={normalizeTierKey(tier)}>{tier}</option>)}
+                  </select>
+                  <button
+                    className="button button-outline"
+                    type="button"
+                    onClick={runCounterfactuals}
+                    disabled={!hasLiveResult || counterfactualLoading}
+                  >
+                    {counterfactualLoading ? 'Searching scenarios…' : counterfactualData ? 'Search again' : 'Find alternatives'}
+                    {!counterfactualLoading && <span aria-hidden="true">↗</span>}
+                  </button>
+                </div>
+                {counterfactualError && <p className="insight-error" role="alert">{counterfactualError}</p>}
+                {counterfactualData && (
+                  <div className="counterfactual-output" aria-live="polite">
+                    <div className="counterfactual-summary">
+                      <strong>{counterfactualData.candidate_flips_found ?? counterfactualFlips.length}</strong>
+                      <span>candidate outcomes found</span>
+                      <small>{counterfactualData.evaluations ?? 0} scenarios checked</small>
+                      <small>
+                        Returned: {counterfactualTierSwitchCount} tier switches · {counterfactualNoFeasibleCount} no-feasible results
+                      </small>
+                      {counterfactualUnavailableDestinationCount > 0 && (
+                        <small>{counterfactualUnavailableDestinationCount} destinations unavailable in response</small>
+                      )}
+                      {counterfactualData.truncated === true && (
+                        <small>Showing {counterfactualFlips.length} returned outcomes; results were truncated.</small>
+                      )}
+                    </div>
+                    {counterfactualFlips.length > 0 ? (
+                      <>
+                        <div className="counterfactual-path-list" role="list" aria-label="Possible changes">
+                          {counterfactualFlips.map((flip, index) => (
+                            <button
+                              className={`counterfactual-path ${selectedCounterfactual === index ? 'is-selected' : ''} ${flip.to_tier === null ? 'is-no-feasible' : ''}`}
+                              type="button"
+                              key={`${flip.field}-${flip.to}-${index}`}
+                              onClick={() => setSelectedCounterfactual(index)}
+                              aria-pressed={selectedCounterfactual === index}
+                            >
+                              <span>{formatComparisonTier(flip.from_tier)}</span>
+                              <i aria-hidden="true">→</i>
+                              <strong>{formatCounterfactualDestination(flip.to_tier)}</strong>
+                              <small>{String(flip.field || '').replaceAll('_', ' ')}</small>
+                            </button>
+                          ))}
+                        </div>
+                        {selectedFlip && (
+                          <div className="counterfactual-detail">
+                            <div className="counterfactual-change-visual">
+                              <span>{String(selectedFlip.field || '').replaceAll('_', ' ')}</span>
+                              <strong>{formatScenarioValue(selectedFlip.from)} <i aria-hidden="true">→</i> {formatScenarioValue(selectedFlip.to)}</strong>
+                            </div>
+                            <p>
+                              {selectedFlip.description
+                                || (selectedFlip.to_tier === null
+                                  ? 'This sampled input change left no feasible deployment tier.'
+                                  : 'The backend did not return a scenario description.')}
+                            </p>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <p className="insight-caption">No sampled input changes produced a different leading tier. Try a different target or input dimension.</p>
+                    )}
+                    {Array.isArray(counterfactualData.limitations) && counterfactualData.limitations.length > 0 && (
+                      <details className="insight-footnote">
+                        <summary>How to read these scenarios</summary>
+                        <ul>{counterfactualData.limitations.slice(0, 3).map((item) => <li key={item}>{item}</li>)}</ul>
+                      </details>
+                    )}
+                  </div>
+                )}
+                {!hasLiveResult && <p className="insight-caption">Run a live backend analysis to explore alternatives.</p>}
+              </article>
+
+              <article className="advanced-insight-card panel pareto-card">
+                <div className="insight-card-heading">
+                  <span className="insight-index">02</span>
+                  <div>
+                    <p className="technical-label">PARETO TRADE-OFF</p>
+                    <h3>Speed versus monthly cost</h3>
+                  </div>
+                  {optimization?.pareto?.status && <span className="insight-status">{optimization.pareto.status.replaceAll('_', ' ')}</span>}
+                </div>
+                {optimization?.pareto ? (
+                  <>
+                    <ParetoPlot pareto={optimization.pareto} feasibility={feasibility} slaChecks={slaChecks} />
+                    <p className="insight-caption">{optimization.pareto.note}</p>
+                    {isRecord(optimization.pareto.excluded_or_missing) && Object.keys(optimization.pareto.excluded_or_missing).length > 0 && (
+                      <details className="insight-footnote">
+                        <summary>Why some tiers are missing</summary>
+                        <ul>{Object.entries(optimization.pareto.excluded_or_missing).map(([tier, reason]) => <li key={tier}><strong>{formatTierName(tier)}:</strong> {reason}</li>)}</ul>
+                      </details>
+                    )}
+                  </>
+                ) : (
+                  <div className="insight-unavailable">
+                    <p>Compare tiers that offer different speed and cost trade-offs.</p>
+                  </div>
+                )}
+              </article>
+
+              <article className="advanced-insight-card panel breakeven-card">
+                <div className="insight-card-heading">
+                  <span className="insight-index">03</span>
+                  <div>
+                    <p className="technical-label">BREAK-EVEN</p>
+                    <h3>When does cost cross over?</h3>
+                  </div>
+                  {optimization?.cost_break_even?.status && <span className="insight-status">{optimization.cost_break_even.status.replaceAll('_', ' ')}</span>}
+                </div>
+                {optimization?.cost_break_even ? (
+                  <BreakEvenVisual analysis={optimization.cost_break_even} feasibility={feasibility} />
+                ) : (
+                  <div className="insight-unavailable">
+                    <div className="break-even-orbit" aria-hidden="true"><i /></div>
+                    <p>Modelled cost curves can show when one tier’s monthly cost becomes lower.</p>
+                  </div>
+                )}
+              </article>
+
+              <article className="advanced-insight-card panel hybrid-card">
+                <div className="insight-card-heading">
+                  <span className="insight-index">04</span>
+                  <div>
+                    <p className="technical-label">HYBRID CONCEPT</p>
+                    <h3>Keep critical work local</h3>
+                  </div>
+                  {optimization?.hybrid?.status && <span className="insight-status">{optimization.hybrid.status.replaceAll('_', ' ')}</span>}
+                </div>
+                {optimization?.hybrid ? (
+                  <>
+                    <HybridFlow hybrid={optimization.hybrid} />
+                    <p className="insight-caption">
+                      Allow remote processing is {reportWorkload?.allow_remote_processing === true ? 'enabled' : 'disabled'}. Enabling it permits evaluation; it does not guarantee a hybrid proposal.
+                    </p>
+                  </>
+                ) : (
+                  <div className="insight-unavailable">
+                    <div className="hybrid-mini-visual" aria-hidden="true"><i /><i /><i /></div>
+                    <p>See whether local inference and optional remote analytics could be combined.</p>
+                  </div>
+                )}
+              </article>
+
+              <article className="advanced-insight-card panel reliability-card">
+                <div className="insight-card-heading">
+                  <span className="insight-index">05</span>
+                  <div>
+                    <p className="technical-label">RELIABILITY AUDIT</p>
+                    <h3>Did the result follow its rules?</h3>
+                  </div>
+                  {reliability?.status && <span className="insight-status">{reliability.status.replaceAll('_', ' ')}</span>}
+                </div>
+                {reliability ? (
+                  <ReliabilitySummary audit={reliability} evidenceGaps={evidenceGaps} />
+                ) : (
+                  <div className="insight-unavailable">
+                    <div className="audit-radar" aria-hidden="true"><i /><i /><i /></div>
+                    <p>Check eligibility, evidence labels, and internal consistency.</p>
+                  </div>
+                )}
+              </article>
+            </div>
+          </section>
           <div className="info-grid">
             <InfoCard title="Warnings" items={currentResult.warnings} emptyMessage={hasSimulation ? 'Unavailable' : undefined} />
             <InfoCard title="Trade-offs" items={currentResult.tradeoffs} emptyMessage={hasSimulation ? 'Unavailable' : undefined} />
