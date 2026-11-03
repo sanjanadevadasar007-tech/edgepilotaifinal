@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import unittest
 from ai_engine.benchmark_registry import read_catalog
+from ai_engine.benchmarked import recommend_with_benchmarks
 from ai_engine.scenarios import simulate_scenario
 from ai_engine.counterfactuals import discover_flips
 
@@ -61,6 +62,52 @@ class Stage5Tests(unittest.TestCase):
         self.assertEqual(r['scenario']['details']['tier_estimates']['cloud']['latency_ms'], 112)
         self.assertEqual(r['scenario']['details']['tier_estimates']['cloud']['latency_target_met'], False)
 
+    def test_latency_deadline_change_reweights_scenario_scores(self):
+        r = self.run_scenario({'latency_requirement_ms': 120})
+        self.assertEqual(r['baseline']['details']['weights']['latency'], 6)
+        self.assertEqual(r['scenario']['details']['weights']['latency'], 3)
+        self.assertNotEqual(r['baseline']['scores'], r['scenario']['scores'])
+
+    def test_invalidated_metrics_use_comparable_scores_and_provisional_tier(self):
+        changes = {
+            'latency_requirement_ms': 620,
+            'network_available': True,
+            'privacy_requirement': 'low',
+        }
+        r = self.run_scenario(changes)
+        self.assertEqual(r['comparison']['metrics_handling']['mode'], 'baseline_metrics_invalidated')
+        self.assertIsNone(r['comparison']['new_tier'])
+        self.assertIsNone(r['comparison']['recommendation_changed'])
+        self.assertEqual(
+            r['comparison']['score_comparison_basis'],
+            'shared qualitative profiles without workload-specific metrics',
+        )
+
+        comparable_baseline = recommend_with_benchmarks(
+            self.request, benchmark_catalog=self.catalog, metrics_by_tier=None
+        )
+        for tier, delta in r['comparison']['score_deltas'].items():
+            self.assertEqual(delta['before'], comparable_baseline['scores'][tier])
+            self.assertEqual(delta['after'], r['scenario']['scores'][tier])
+
+        candidate = r['comparison']['provisional_tier']
+        self.assertEqual(candidate, 'regional_edge')
+        self.assertEqual(
+            r['scenario']['details']['provisional_recommendation']['tier'],
+            candidate,
+        )
+        self.assertFalse(
+            r['scenario']['details']['provisional_recommendation']['evidence_qualified']
+        )
+        self.assertTrue(r['scenario']['details']['feasibility'][candidate]['eligible'])
+        self.assertEqual(
+            r['scenario']['scores'][candidate],
+            max(
+                score for tier, score in r['scenario']['scores'].items()
+                if r['scenario']['details']['feasibility'][tier]['eligible']
+            ),
+        )
+
     def test_budget_change_reuses_cost_estimates(self):
         r = self.run_scenario({'budget_monthly': 450})
         self.assertEqual(r['scenario']['details']['tier_estimates']['on_device']['monthly_cost_inr'], 400)
@@ -82,14 +129,18 @@ class Stage5Tests(unittest.TestCase):
         self.assertEqual(r['scenario']['details']['benchmark']['status'], 'no_match')
         self.assertIsNone(r['scenario']['estimates']['latency_ms'])
 
-    def test_ram_shortage_forces_real_flip(self):
+    def test_ram_shortage_removes_on_device_from_scenario(self):
         r = self.run_scenario({'model_ram_required_mb': 4096, 'device_available_ram_mb': 1024})
-        self.assertTrue(r['comparison']['recommendation_changed'])
         self.assertEqual(r['comparison']['original_tier'], 'on_device')
-        self.assertNotEqual(r['comparison']['new_tier'], 'on_device')
         self.assertFalse(r['scenario']['details']['feasibility']['on_device']['eligible'])
         self.assertTrue(r['comparison']['feasibility_changes']['on_device']['was_eligible'])
         self.assertFalse(r['comparison']['feasibility_changes']['on_device']['now_eligible'])
+        if r['comparison']['new_tier'] is None:
+            self.assertIsNone(r['comparison']['recommendation_changed'])
+            self.assertNotEqual(r['comparison']['provisional_tier'], 'on_device')
+        else:
+            self.assertTrue(r['comparison']['recommendation_changed'])
+            self.assertNotEqual(r['comparison']['new_tier'], 'on_device')
 
     def test_network_offline_blocks_remote(self):
         r = self.run_scenario({'network_available': False})

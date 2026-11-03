@@ -85,8 +85,10 @@ npm ci
 npm start
 ```
 
-In another terminal, create a root-level `.env.local` file containing the same
-backend token and the backend origin reachable from Vite:
+Vite can read the backend token directly from `backend/.env`. If the backend is
+running elsewhere, or you want to override the token, create a root-level
+`.env.local` file with the backend origin reachable from Vite and (if needed)
+the matching token:
 
 ```text
 API_AUTH_TOKEN=your-local-backend-token
@@ -101,12 +103,12 @@ npm run dev -- --host 0.0.0.0
 ```
 
 The Vite development server proxies `/api` requests to `API_BACKEND_URL`
-(default `http://127.0.0.1:5001`). It reads the bearer token from `.env.local` or
-the `API_AUTH_TOKEN` process environment variable and adds it on the server side
-for protected routes; the token is not included in browser code. Health checks
-do not require authentication. `.env.local` is gitignored. Restart Vite after
-changing these values. Never use a `VITE_` prefix for the token or commit it to
-the frontend.
+(default `http://127.0.0.1:5001`). It reads the bearer token from the
+`API_AUTH_TOKEN` process environment variable, root `.env.local`, or
+`backend/.env` (in that order), then adds it on the server side for protected
+routes; the token is not included in browser code. Health checks do not require
+authentication. `.env.local` is gitignored. Restart Vite after changing these
+values. Never use a `VITE_` prefix for the token or commit it to the frontend.
 
 `localhost` and `127.0.0.1` refer to the machine or container running Vite. If
 the backend runs in a separate environment, set `API_BACKEND_URL` to an address

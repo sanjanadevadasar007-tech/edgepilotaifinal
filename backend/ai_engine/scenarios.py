@@ -99,10 +99,29 @@ def _feasibility_changes(before, after):
     return change
 
 
-def _description(before, after, changes, handling, feasibility_change):
+def _provisional_tier(result):
+    if result["recommended_tier"] is not None:
+        return None
+    feasibility = result["details"]["feasibility"]
+    candidates = [
+        tier for tier in TIERS
+        if feasibility[tier]["eligible"]
+        and isinstance(result["scores"].get(tier), (int, float))
+    ]
+    return max(candidates, key=lambda tier: (result["scores"][tier], -TIERS.index(tier)), default=None)
+
+
+def _description(before, after, changes, handling, feasibility_change, provisional_tier):
     old, new = before["recommended_tier"], after["recommended_tier"]
     label = lambda tier: tier.replace("_", " ") if tier else "no feasible tier"
-    if old != new:
+    if new is None:
+        sentence = "No evidence-qualified recommendation is available for this scenario."
+        if provisional_tier:
+            sentence += (
+                f" {label(provisional_tier)} has the highest heuristic score among tiers "
+                "not explicitly blocked by the scenario constraints."
+            )
+    elif old != new:
         sentence = f"Recalculation changed the leading tier from {label(old)} to {label(new)}."
     else:
         sentence = f"Recalculation kept {label(new)} as the leading tier."
@@ -145,6 +164,22 @@ def simulate_scenario(payload, *, changes, benchmark_catalog, metrics_by_tier=No
     if handling["mode"] == "baseline_metrics_invalidated":
         after["warnings"].append("Scenario invalidated baseline tier metrics; supply freshly modeled or measured scenario metrics for comparable cost/latency figures.")
     fchanges = _feasibility_changes(before, after)
+    provisional_tier = _provisional_tier(after)
+    if provisional_tier:
+        after["details"]["provisional_recommendation"] = {
+            "tier": provisional_tier,
+            "basis": "highest heuristic score among tiers not explicitly blocked by hard constraints",
+            "evidence_qualified": False,
+        }
+
+    score_baseline = before
+    score_comparison_basis = "workload-specific metrics"
+    if handling["mode"] == "baseline_metrics_invalidated":
+        score_baseline = recommend_with_benchmarks(
+            payload, benchmark_catalog=benchmark_catalog, metrics_by_tier=None, llm=None
+        )
+        score_comparison_basis = "shared qualitative profiles without workload-specific metrics"
+
     input_diff = [
         {"field": k, "before": deepcopy(payload["workload"].get(k)), "after": deepcopy(v)}
         for k, v in sorted(actual_changes.items())
@@ -156,17 +191,25 @@ def simulate_scenario(payload, *, changes, benchmark_catalog, metrics_by_tier=No
     ]
     if handling["mode"] == "baseline_metrics_invalidated":
         notes.append("Costs and total latency in the original scenario must not be assumed valid after the workload change.")
+        notes.append("Before and scenario score deltas use the same qualitative-only evidence basis; they are not workload-specific performance predictions.")
     comparison = {
         "original_tier": before["recommended_tier"],
         "new_tier": after["recommended_tier"],
-        "recommendation_changed": before["recommended_tier"] != after["recommended_tier"],
+        "recommendation_changed": (
+            before["recommended_tier"] != after["recommended_tier"]
+            if after["recommended_tier"] is not None else None
+        ),
+        "provisional_tier": provisional_tier,
         "changed_inputs": input_diff,
-        "score_deltas": _deltas(before, after),
+        "score_deltas": _deltas(score_baseline, after),
+        "score_comparison_basis": score_comparison_basis,
         "feasibility_changes": fchanges,
         "metrics_handling": handling,
         "benchmark_before": before["details"]["benchmark"].get("status"),
         "benchmark_after": after["details"]["benchmark"].get("status"),
-        "explanation": _description(before, after, actual_changes, handling, fchanges),
+        "explanation": _description(
+            before, after, actual_changes, handling, fchanges, provisional_tier
+        ),
         "limitations": notes,
     }
     return {"baseline": before, "scenario": after, "comparison": comparison}
