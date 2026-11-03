@@ -76,8 +76,14 @@ class Stage6Tests(unittest.TestCase):
         hybrid = self.run_engine()['details']['optimization']['hybrid']
         self.assertEqual(hybrid['status'], 'candidate_requires_validation')
         self.assertEqual(len(hybrid['nodes']), 4)
+        self.assertEqual(hybrid['local_memory'], {
+            'model_ram_required_mb': 256,
+            'device_available_ram_mb': 1024,
+            'fits': True,
+        })
         self.assertEqual(hybrid['critical_path'], ['device', 'local_inference'])
         self.assertEqual(len(hybrid['connections']), 3)
+        self.assertTrue(any('High privacy:' in check for check in hybrid['validation_checks']))
 
     def test_team_engine_optimize_exposes_hybrid_architecture(self):
         engine = TeamEngine(benchmark_catalog=self.catalog)
@@ -114,12 +120,26 @@ class Stage6Tests(unittest.TestCase):
     def test_12_hybrid_denied_insufficient_memory(self):
         req = copy.deepcopy(self.req)
         req['workload']['device_available_ram_mb'] = 128
-        self.assertEqual(self.run_engine(req=req)['details']['optimization']['hybrid']['status'], 'not_proposed')
+        hybrid = self.run_engine(req=req)['details']['optimization']['hybrid']
+        self.assertEqual(hybrid['status'], 'not_proposed')
+        self.assertEqual(hybrid['nodes'], [])
+        self.assertEqual(hybrid['local_memory']['fits'], False)
 
     def test_13_hybrid_requires_known_memory(self):
         req = copy.deepcopy(self.req)
         del req['workload']['model_ram_required_mb']
-        self.assertEqual(self.run_engine(req=req)['details']['optimization']['hybrid']['status'], 'not_proposed')
+        hybrid = self.run_engine(req=req)['details']['optimization']['hybrid']
+        self.assertEqual(hybrid['status'], 'not_proposed')
+        self.assertEqual(hybrid['nodes'], [])
+        self.assertIsNone(hybrid['local_memory']['fits'])
+
+    def test_hybrid_respects_allowed_tiers_policy(self):
+        req = copy.deepcopy(self.req)
+        req['workload']['allowed_tiers'] = ['on_device']
+        hybrid = self.run_engine(req=req)['details']['optimization']['hybrid']
+        self.assertEqual(hybrid['status'], 'not_proposed')
+        self.assertEqual(hybrid['nodes'], [])
+        self.assertIn('No eligible remote analytics tier', hybrid['reasons'])
 
     def test_14_hybrid_does_not_claim_certainty(self):
         obj = self.run_engine()['details']['optimization']['hybrid']

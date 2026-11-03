@@ -163,7 +163,7 @@ const DEPLOYMENT_DETAILS = {
     'Nearby compute trades some locality for distributed capacity.',
   ],
   'Regional edge': [
-    'Balanced placement',
+    'Regional placement preview',
     'A regional fabric balancing latency, data locality, and scale.',
     'Balances local responsiveness with broader shared capacity.',
   ],
@@ -189,7 +189,7 @@ function updatePointerLight(event) {
 function DeploymentMapFallback() {
   const [selectedTier, setSelectedTier] = useState('Regional edge');
   const activePath = DEPLOYMENT_ROUTES[selectedTier];
-  const [detailTitle, detailCopy, detailContext] = DEPLOYMENT_DETAILS[selectedTier];
+  const [, detailCopy, detailContext] = DEPLOYMENT_DETAILS[selectedTier];
   const tierClass = selectedTier.toLowerCase().replaceAll(' ', '-');
 
   return (
@@ -262,7 +262,7 @@ function DeploymentMapFallback() {
         >
           <span aria-hidden="true">⌘</span>
           <strong>REGIONAL EDGE</strong>
-          <small>balanced / selected</small>
+          <small>balanced / preview</small>
         </button>
         <button
           className={`map-node node-cloud ${selectedTier === 'Cloud' ? 'is-active' : ''}`}
@@ -291,7 +291,7 @@ function DeploymentMapFallback() {
         </div>
       </section>
       <div className="map-caption" aria-live="polite">
-        <span>Illustrative sample signal · {detailTitle}</span>
+        <span>Illustrative preview only · Not based on your workload</span>
         <strong>{selectedTier}</strong>
         <p>{detailCopy}</p>
         <small>{detailContext}</small>
@@ -944,7 +944,14 @@ function formatTierName(value) {
   return TIERS.find((tier) => normalizeTierKey(tier) === normalizeTierKey(value)) ?? value;
 }
 
-function DeploymentRouteDiagram({ recommendation, scores, hasResult, resultSource }) {
+function DeploymentRouteDiagram({
+  recommendation,
+  scores,
+  hasResult,
+  resultSource,
+  workload,
+  workloadLabel = 'Inputs used for this result',
+}) {
   const [motionAllowed, setMotionAllowed] = useState(
     () => !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
   );
@@ -1080,9 +1087,37 @@ function DeploymentRouteDiagram({ recommendation, scores, hasResult, resultSourc
           )}
         </svg>
       </div>
-      <div className="deployment-route-legend" aria-hidden="true">
+      {hasResult && isRecord(workload) && (
+        <div className="deployment-route-inputs">
+          <strong>{workloadLabel}</strong>
+          <div className="deployment-route-input-list">
+            {[
+              ['Latency target', workload.latency_requirement_ms == null ? null : `${workload.latency_requirement_ms} ms`],
+              ['Data-transfer need', workload.bandwidth_requirement],
+              ['Privacy', workload.privacy_requirement],
+              ['Monthly budget', workload.budget_monthly == null ? null : `₹${Number(workload.budget_monthly).toLocaleString()} / month`],
+              ['Criticality', workload.criticality],
+              ['Network', typeof workload.network_available === 'boolean' ? (workload.network_available ? 'Available' : 'Unavailable') : null],
+              ['Model / device RAM', workload.model_ram_required_mb != null && workload.device_available_ram_mb != null
+                ? `${workload.model_ram_required_mb} / ${workload.device_available_ram_mb} MB`
+                : null],
+              ['Available network speed', workload.bandwidth_available_mbps == null ? null : `${workload.bandwidth_available_mbps} Mbps`],
+              ['Minimum network speed', workload.minimum_network_bandwidth_mbps == null ? null : `${workload.minimum_network_bandwidth_mbps} Mbps`],
+              ['Concurrent users', workload.concurrent_users == null ? null : Number(workload.concurrent_users).toLocaleString()],
+              ['Remote processing', typeof workload.allow_remote_processing === 'boolean' ? (workload.allow_remote_processing ? 'Allowed' : 'Not allowed') : null],
+              ['Offline-only', typeof workload.require_offline === 'boolean' ? (workload.require_offline ? 'Yes' : 'No') : null],
+            ].filter(([, value]) => value != null && value !== '').map(([label, value]) => (
+              <span key={label}><small>{label}</small><strong>{value}</strong></span>
+            ))}
+          </div>
+          <small className="deployment-route-input-note">
+            Optional inputs not listed here were not supplied. The diagram is a schematic, not a geographic map.
+          </small>
+        </div>
+      )}
+      <div className="deployment-route-legend">
         {hasResult ? (
-          <span>Suitability scores are returned by the service; they are not benchmark measurements.</span>
+          <span>The highlighted route and scores come from the service response; scores are not benchmark measurements.</span>
         ) : (
           <>
             <span><i /> Workload signal</span>
@@ -1094,23 +1129,163 @@ function DeploymentRouteDiagram({ recommendation, scores, hasResult, resultSourc
   );
 }
 
-function InfoCard({ title, items, emptyMessage }) {
+function humanizeRecommendationNote(item, kind, { workload, recommendation, details }) {
+  if (typeof item !== 'string') return JSON.stringify(item);
+  const text = item.toLowerCase();
+  const tierLabel = typeof recommendation === 'string' && recommendation
+    ? formatTierName(recommendation)
+    : 'the selected tier';
+  const tierKey = normalizeTierKey(recommendation);
+
+  if (kind === 'warnings') {
+    if (text.startsWith('demo heuristics:')) {
+      return 'These scores are rough comparisons for this demo. They are not probabilities or measured deployment rankings.';
+    }
+    if (text.startsWith('reported metric values for the winner')) {
+      const estimate = details?.tier_estimates?.[tierKey] || {};
+      const metrics = [
+        estimate.latency_ms != null ? `latency (${estimate.latency_source || 'not sourced'})` : null,
+        estimate.monthly_cost_inr != null ? `monthly cost (${estimate.cost_source || 'not sourced'})` : null,
+      ].filter(Boolean);
+      return `For ${tierLabel}, ${metrics.length ? metrics.join(' and ') : 'the reported values'} are estimates, not verified measurements or provider quotes.`;
+    }
+    if (text.startsWith('recommended tier is not fully verified')) {
+      const gaps = details?.evidence_gaps?.[tierKey];
+      return Array.isArray(gaps) && gaps.length
+        ? `Some checks for ${tierLabel} are still unverified. See “Evidence limitations by tier” in the Reliability Audit section.`
+        : `Some checks for ${tierLabel} are still unverified; see the Reliability Audit section.`;
+    }
+    if (text.startsWith('matched qualcomm benchmark measures only model inference')) {
+      return 'The matching device benchmark covers model inference only. It was not used as end-to-end latency or to change the tier ranking.';
+    }
+    if (text.startsWith('the selected tier has an estimated sla overrun')) {
+      const checks = details?.sla_checks?.[tierKey] || {};
+      const breaches = [
+        checks.latency_status === 'provisional_fail' ? 'latency' : null,
+        checks.cost_status === 'provisional_fail' ? 'monthly cost' : null,
+      ].filter(Boolean);
+      return `The estimate for ${tierLabel}${breaches.length ? ` exceeds the entered ${breaches.join(' and ')} limit` : ' may exceed an entered limit'}. This is provisional, not a measured failure.`;
+    }
+    if (text.startsWith('one or more deployment tiers failed hard feasibility checks')) {
+      return 'Some deployment choices were excluded because they conflict with the workload constraints.';
+    }
+    if (text.startsWith('no tier has both latency and cost evidence')) {
+      return 'The service could not select a tier because the available latency and cost evidence did not satisfy the limits.';
+    }
+    if (text.startsWith('on-device memory feasibility is unverified')) {
+      return workload?.model_ram_required_mb == null || workload?.device_available_ram_mb == null
+        ? 'The model memory need and available device memory were not both supplied, so local fit could not be checked.'
+        : 'The service could not verify whether this model fits the device memory.';
+    }
+    if (text.startsWith('some tier costs are unknown')) {
+      return 'Some tier prices were not provided. The scoring model uses a neutral placeholder for those costs, not a real price.';
+    }
+    if (text.startsWith('reported metric values')) {
+      return `Some displayed values for ${tierLabel} are estimates, not measured results or provider quotes.`;
+    }
+  }
+
+  if (kind === 'trade-offs') {
+    if (text.includes('local hardware capacity and thermal/power limits')) {
+      return 'The model must fit the device and stay within its power and heat limits.';
+    }
+    if (text.includes('model updates, monitoring and scaling across devices')) {
+      return 'Updating and monitoring the model across devices takes extra operational work.';
+    }
+    if (text.includes('requires deployed far-edge infrastructure')) {
+      return 'This option needs nearby edge infrastructure and a working network connection.';
+    }
+    if (text.includes('compute availability and latency depend on the exact access-network location')) {
+      return 'Actual speed and availability depend on where the nearby edge server is located.';
+    }
+    if (text.includes('requires regional edge infrastructure')) {
+      return 'This option needs regional edge infrastructure and a working network connection.';
+    }
+    if (text.includes('off-device processing needs suitable data protection')) {
+      return 'Data leaves the device, so suitable privacy and access controls are needed.';
+    }
+    if (text.includes('network transfer adds variability')) {
+      return 'Sending data over a network can add delay and may increase running costs.';
+    }
+    if (text.includes('privacy, data residency and service outages')) {
+      return 'Plan for privacy, where data is stored, and what happens during a service outage.';
+    }
+    if (text.startsWith('no deployment tier passes')) {
+      return 'No available option met both the entered latency and monthly cost limits.';
+    }
+  }
+
+  if (kind === 'assumptions') {
+    if (text.startsWith("'bandwidth_requirement' means")) {
+      const demand = workload?.bandwidth_requirement || 'not provided';
+      return `Your data-transfer need is set to ${demand}. This describes how much data the application needs to send; it is not a measured internet speed.`;
+    }
+    if (text.startsWith('tier profiles are illustrative ordinal assumptions')) {
+      return 'The tier profiles are demo assumptions, not device benchmark results.';
+    }
+    if (text.startsWith('far edge is modeled as access-network compute')) {
+      return 'In this comparison, “far edge” means nearby access-network computing; “regional edge” means a more distant regional data center.';
+    }
+    if (text.startsWith('high criticality increases resilience priority')) {
+      return `Criticality is set to ${workload?.criticality || 'not provided'}. A higher setting gives resilience more weight; it does not promise uptime or automatic failover.`;
+    }
+    if (text.startsWith('low positive bandwidth by itself')) {
+      return `The supplied network speed (${workload?.bandwidth_available_mbps} Mbps) is compared with the minimum (${workload?.minimum_network_bandwidth_mbps} Mbps). The data-transfer need (${workload?.bandwidth_requirement}) is a separate input and is not a measured speed.`;
+    }
+    if (text.startsWith('only confirmed constraints eliminate options')) {
+      return 'Only constraints confirmed by the supplied inputs exclude options. Missing device or network details remain unknown.';
+    }
+    if (text.startsWith('a neutral affordability prior of 50')) {
+      return 'When a tier price is unknown, the scoring model uses a neutral affordability placeholder. It is not a price estimate.';
+    }
+    if (text.startsWith('selected tier metric provenance:')) {
+      const estimate = details?.tier_estimates?.[tierKey] || {};
+      return `For ${tierLabel}, the latency value is ${estimate.latency_source || 'not provided'} and the monthly cost is ${estimate.cost_source || 'not provided'}.`;
+    }
+  }
+
+  return item;
+}
+
+function isRelevantRecommendationNote(item, kind, { workload, details }) {
+  if (kind !== 'assumptions' || typeof item !== 'string') return true;
+  const text = item.toLowerCase();
+  if (text.startsWith('a neutral affordability prior of 50')) {
+    return Object.values(details?.score_breakdown || {}).some(
+      (tier) => tier?.affordability?.origin === 'unknown_neutral_prior',
+    );
+  }
+  if (text.startsWith('low positive bandwidth by itself')) {
+    return workload?.bandwidth_available_mbps != null
+      && workload?.minimum_network_bandwidth_mbps != null;
+  }
+  return true;
+}
+
+function InfoCard({ title, items, emptyMessage, kind, workload, recommendation, details }) {
   const values = Array.isArray(items) && items.length > 0
-    ? items
-    : [emptyMessage && !Array.isArray(items) ? emptyMessage : `No ${title.toLowerCase()} returned by the service.`];
-  const kind = title.toLowerCase().replace(/[^a-z]+/g, '-');
-  const icon = { warnings: '!', 'trade-offs': '↔', assumptions: '⌁' }[kind] ?? '◈';
+    ? items.filter((item) => isRelevantRecommendationNote(item, kind, { workload, details }))
+    : [];
+  const displayValues = values.length > 0
+    ? values
+    : emptyMessage
+      ? [emptyMessage]
+      : values.length === 0 && Array.isArray(items) && items.length > 0
+        ? ['No additional model assumptions apply to the supplied workload.']
+        : [emptyMessage || `No ${title.toLowerCase()} returned by the service.`];
+  const cardKind = kind || title.toLowerCase().replace(/[^a-z]+/g, '-');
+  const icon = { warnings: '!', 'trade-offs': '↔', assumptions: '⌁' }[cardKind] ?? '◈';
 
   return (
-    <section className={`info-card info-card-${kind} panel`}>
+    <section className={`info-card info-card-${cardKind} panel`}>
       <h2>
         <span className="info-card-icon" aria-hidden="true">{icon}</span>
         {title}
       </h2>
       <ul>
-        {values.map((item, index) => (
+        {displayValues.map((item, index) => (
           <li key={`${title}-${index}`}>
-            {typeof item === 'string' ? item : JSON.stringify(item)}
+            {humanizeRecommendationNote(item, cardKind, { workload, recommendation, details })}
           </li>
         ))}
       </ul>
@@ -1146,68 +1321,68 @@ function ParetoPlot({ pareto, feasibility, slaChecks }) {
     <figure className="insight-chart">
       {entries.length >= 2 ? (
         <>
-        <div className="pareto-chart-viewport" tabIndex="0" aria-label="Scrollable Pareto trade-off chart">
-        <svg className="pareto-chart-svg" viewBox="0 0 660 318" role="img" aria-label="Pareto chart comparing end-to-end latency and estimated monthly cost for compared tiers">
-          {[0, 1, 2, 3, 4].map((step) => {
-            const gridY = plot.bottom - step * (plot.bottom - plot.top) / 4;
-            const gridX = plot.left + step * (plot.right - plot.left) / 4;
-            return (
-              <g key={step}>
-                <line className="chart-grid-line" x1={plot.left} y1={gridY} x2={plot.right} y2={gridY} />
-                <line className="chart-grid-line" x1={gridX} y1={plot.top} x2={gridX} y2={plot.bottom} />
-                <text className="chart-tick" x={plot.left - 9} y={gridY + 3} textAnchor="end">
-                  {numberLabel(maxCost * step / 4)}
-                </text>
-                <text className="chart-tick" x={gridX} y={plot.bottom + 17} textAnchor="middle">
-                  {numberLabel(maxLatency * step / 4)}
-                </text>
-              </g>
-            );
-          })}
-          <line className="chart-axis" x1={plot.left} y1={plot.top} x2={plot.left} y2={plot.bottom} />
-          <line className="chart-axis" x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.bottom} />
-          <text className="chart-axis-label chart-x-axis-label" x="332" y="299" textAnchor="middle">End-to-end latency (ms)</text>
-          <text className="chart-axis-label" transform="translate(17 140) rotate(-90)" textAnchor="middle">Estimated monthly cost (INR)</text>
-          {entries.map((entry) => {
-            const isFrontier = frontier.has(entry.tier);
-            const key = normalizeTierKey(entry.tier);
-            const latencyStatus = slaChecks?.[key]?.latency_status;
-            const targetStatus = latencyStatus === 'provisional_fail'
-              ? 'Estimated latency provisionally exceeds the target'
-              : latencyStatus === 'fail'
-                ? 'Measured latency exceeds the target'
-                : latencyStatus === 'provisional_pass'
-                  ? 'Estimated latency provisionally meets the target'
-                  : latencyStatus === 'pass'
-                    ? 'Measured latency meets the target'
-                    : 'Latency target status unavailable';
-            const eligibility = feasibility?.[key]?.eligible === true
-              ? 'Eligible for ranking'
-              : feasibility?.[key]?.eligible === false
-                ? `Not eligible: ${(feasibility[key].reasons || []).join('; ') || 'backend marked ineligible'}`
-                : 'Eligibility status unavailable';
-            const evidenceType = `Latency evidence: ${entry.latency_source || 'unknown'}; cost evidence: ${entry.cost_source || 'unknown'}`;
-            const title = `${formatTierName(entry.tier)}: ${numberLabel(entry.end_to_end_latency_ms)} ms end-to-end latency, INR ${numberLabel(entry.monthly_cost_inr)} monthly cost. ${evidenceType}. ${isFrontier ? 'Pareto-optimal (non-dominated).' : 'Dominated.'} ${eligibility}. ${targetStatus}.`;
-            return (
-              <g key={entry.tier} className={`chart-point ${isFrontier ? 'is-frontier' : 'is-dominated'}`}>
-                <title>{title}</title>
-                {isFrontier
-                  ? <circle cx={x(entry.end_to_end_latency_ms)} cy={y(entry.monthly_cost_inr)} r="7" />
-                  : <rect x={x(entry.end_to_end_latency_ms) - 5} y={y(entry.monthly_cost_inr) - 5} width="10" height="10" />}
-                <text x={x(entry.end_to_end_latency_ms) + 10} y={y(entry.monthly_cost_inr) - 8}>
-                  {formatTierName(entry.tier)}
-                </text>
-              </g>
-            );
-          })}
-        </svg>
-        </div>
-        {entries.length >= 2 && (
-          <>
-            <p className="chart-scroll-note">Swipe horizontally to inspect all tiers and latency values.</p>
-            <p className="chart-x-axis-mobile">End-to-end latency (ms)</p>
-          </>
-        )}
+          <div className="pareto-chart-viewport" tabIndex="0" aria-label="Scrollable Pareto trade-off chart">
+            <svg className="pareto-chart-svg" viewBox="0 0 660 318" role="img" aria-label="Pareto chart comparing end-to-end latency and estimated monthly cost for compared tiers">
+              {[0, 1, 2, 3, 4].map((step) => {
+                const gridY = plot.bottom - step * (plot.bottom - plot.top) / 4;
+                const gridX = plot.left + step * (plot.right - plot.left) / 4;
+                return (
+                  <g key={step}>
+                    <line className="chart-grid-line" x1={plot.left} y1={gridY} x2={plot.right} y2={gridY} />
+                    <line className="chart-grid-line" x1={gridX} y1={plot.top} x2={gridX} y2={plot.bottom} />
+                    <text className="chart-tick" x={plot.left - 9} y={gridY + 3} textAnchor="end">
+                      {numberLabel(maxCost * step / 4)}
+                    </text>
+                    <text className="chart-tick" x={gridX} y={plot.bottom + 17} textAnchor="middle">
+                      {numberLabel(maxLatency * step / 4)}
+                    </text>
+                  </g>
+                );
+              })}
+              <line className="chart-axis" x1={plot.left} y1={plot.top} x2={plot.left} y2={plot.bottom} />
+              <line className="chart-axis" x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.bottom} />
+              <text className="chart-axis-label chart-x-axis-label" x="332" y="299" textAnchor="middle">End-to-end latency (ms)</text>
+              <text className="chart-axis-label" transform="translate(17 140) rotate(-90)" textAnchor="middle">Estimated monthly cost (INR)</text>
+              {entries.map((entry) => {
+                const isFrontier = frontier.has(entry.tier);
+                const key = normalizeTierKey(entry.tier);
+                const latencyStatus = slaChecks?.[key]?.latency_status;
+                const targetStatus = latencyStatus === 'provisional_fail'
+                  ? 'Estimated latency provisionally exceeds the target'
+                  : latencyStatus === 'fail'
+                    ? 'Measured latency exceeds the target'
+                    : latencyStatus === 'provisional_pass'
+                      ? 'Estimated latency provisionally meets the target'
+                      : latencyStatus === 'pass'
+                        ? 'Measured latency meets the target'
+                        : 'Latency target status unavailable';
+                const eligibility = feasibility?.[key]?.eligible === true
+                  ? 'Eligible for ranking'
+                  : feasibility?.[key]?.eligible === false
+                    ? `Not eligible: ${(feasibility[key].reasons || []).join('; ') || 'backend marked ineligible'}`
+                    : 'Eligibility status unavailable';
+                const evidenceType = `Latency evidence: ${entry.latency_source || 'unknown'}; cost evidence: ${entry.cost_source || 'unknown'}`;
+                const title = `${formatTierName(entry.tier)}: ${numberLabel(entry.end_to_end_latency_ms)} ms end-to-end latency, INR ${numberLabel(entry.monthly_cost_inr)} monthly cost. ${evidenceType}. ${isFrontier ? 'Pareto-optimal (non-dominated).' : 'Dominated.'} ${eligibility}. ${targetStatus}.`;
+                return (
+                  <g key={entry.tier} className={`chart-point ${isFrontier ? 'is-frontier' : 'is-dominated'}`}>
+                    <title>{title}</title>
+                    {isFrontier
+                      ? <circle cx={x(entry.end_to_end_latency_ms)} cy={y(entry.monthly_cost_inr)} r="7" />
+                      : <rect x={x(entry.end_to_end_latency_ms) - 5} y={y(entry.monthly_cost_inr) - 5} width="10" height="10" />}
+                    <text x={x(entry.end_to_end_latency_ms) + 10} y={y(entry.monthly_cost_inr) - 8}>
+                      {formatTierName(entry.tier)}
+                    </text>
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+          {entries.length >= 2 && (
+            <>
+              <p className="chart-scroll-note">Swipe horizontally to inspect all tiers and latency values.</p>
+              <p className="chart-x-axis-mobile">End-to-end latency (ms)</p>
+            </>
+          )}
         </>
       ) : (
         <div className="insight-empty-visual" role="status">
@@ -1233,6 +1408,17 @@ function ParetoPlot({ pareto, feasibility, slaChecks }) {
   );
 }
 
+function humanizeCostCurveNote(value) {
+  if (typeof value !== 'string') return '';
+  if (/no workload-matched, sourced cost curves from person 3/i.test(value)) {
+    return 'No cost curves are available for this exact workload profile. Break-even needs a matching application type, model, target device, runtime, and precision, plus cost assumptions.';
+  }
+  if (/person 3 must supply validated provider\/hardware unit economics/i.test(value)) {
+    return 'Illustrative estimate only; validated provider prices and hardware operating costs are not available.';
+  }
+  return value.replace(/Person 3's linear cost assumptions/gi, 'the simple assumptions used for these cost estimates');
+}
+
 function BreakEvenVisual({ analysis, feasibility }) {
   const costs = isRecord(analysis?.estimated_cost_at_reference_inr)
     ? Object.entries(analysis.estimated_cost_at_reference_inr)
@@ -1241,13 +1427,15 @@ function BreakEvenVisual({ analysis, feasibility }) {
   const crossings = Array.isArray(analysis?.pairwise_break_even_points)
     ? analysis.pairwise_break_even_points
     : [];
+  const curvesUsed = isRecord(analysis?.curves_used) ? analysis.curves_used : {};
   const highestCost = Math.max(1, ...costs.map(([, value]) => Number(value)));
   const maxRequests = Math.max(
     Number(analysis?.reference_monthly_requests) || 0,
     ...crossings.map((item) => Number(item.valid_volume_range?.[1] ?? item.monthly_requests) || 0),
+    ...Object.values(curvesUsed).map((curve) => Number(curve.valid_volume_range?.[1]) || 0),
     1,
   );
-  const curvesUsed = isRecord(analysis?.curves_used) ? analysis.curves_used : {};
+  const canPlotBreakEven = crossings.length > 0 || analysis?.status === 'modeled';
   const unavailableTierReasons = Array.isArray(analysis?.unavailable_at_reference)
     ? analysis.unavailable_at_reference
       .filter((tier) => feasibility?.[normalizeTierKey(tier)]?.eligible === false)
@@ -1283,23 +1471,43 @@ function BreakEvenVisual({ analysis, feasibility }) {
           ))}
         </div>
       )}
-      {crossings.length > 0 ? (
-        <div className="break-even-chart" role="img" aria-label="Modeled request volumes where pairs of tier cost curves cross">
+      {canPlotBreakEven ? (
+        <div
+          className="break-even-chart"
+          role="img"
+          aria-label={crossings.length > 0
+            ? 'Modeled request volumes where pairs of tier cost curves cross'
+            : 'No crossover within the valid ranges of the modeled tier cost curves'}
+        >
           <p>Modeled cost crossover by monthly request volume</p>
           <div className="break-even-axis"><span>0</span><span>{maxRequests.toLocaleString()} requests</span></div>
-          {crossings.map((point, index) => (
-            <div className="break-even-point-row" key={`${point.tiers?.join('-')}-${point.monthly_requests}-${index}`}>
-              <span>{point.tiers?.map(formatTierName).join(' ↔ ') || 'Tier crossover'}</span>
-              <div className="break-even-track">
-                <i style={{ left: `${Math.min(100, Number(point.monthly_requests) / maxRequests * 100)}%` }} />
-              </div>
-              <strong>{Number(point.monthly_requests).toLocaleString()} / mo</strong>
-            </div>
-          ))}
+          {crossings.length > 0 ? (
+            crossings.map((point, index) => {
+              const validRange = Array.isArray(point.valid_volume_range)
+                && point.valid_volume_range.length === 2
+                && point.valid_volume_range.every((value) => Number.isFinite(Number(value)))
+                ? point.valid_volume_range.map(Number)
+                : null;
+              return (
+                <div className="break-even-point-row" key={`${point.tiers?.join('-')}-${point.monthly_requests}-${index}`}>
+                  <span>
+                    {point.tiers?.map(formatTierName).join(' ↔ ') || 'Tier crossover'}
+                    {validRange && <small>Valid {validRange[0].toLocaleString()}–{validRange[1].toLocaleString()} requests/mo</small>}
+                  </span>
+                  <div className="break-even-track">
+                    <i style={{ left: `${Math.min(100, Number(point.monthly_requests) / maxRequests * 100)}%` }} />
+                  </div>
+                  <strong>{Number(point.monthly_requests).toLocaleString()} / mo</strong>
+                </div>
+              );
+            })
+          ) : (
+            <p className="insight-caption">No crossover falls within the valid ranges of these modeled cost curves.</p>
+          )}
         </div>
       ) : (
         <div className="insight-empty-visual is-compact" role="status">
-          <span>{unavailableMessage}</span>
+          <span>{humanizeCostCurveNote(unavailableMessage)}</span>
         </div>
       )}
       {Object.keys(curvesUsed).length > 0 && (
@@ -1309,7 +1517,7 @@ function BreakEvenVisual({ analysis, feasibility }) {
             {Object.entries(curvesUsed).map(([tier, curve]) => (
               <li key={tier}>
                 <strong>{formatTierName(tier)} — {curve.source || 'source unavailable'}:</strong>{' '}
-                {curve.source_reference || 'Source reference unavailable.'}{' '}
+                {humanizeCostCurveNote(curve.source_reference) || 'Source reference unavailable.'}{' '}
                 {Array.isArray(curve.valid_volume_range) && (
                   <>Valid for {curve.valid_volume_range[0]}–{curve.valid_volume_range[1]} requests/month. </>
                 )}
@@ -1319,70 +1527,162 @@ function BreakEvenVisual({ analysis, feasibility }) {
           </ul>
         </details>
       )}
-      <p className="insight-caption">
-        {analysis?.note || analysis?.reason || 'These are modeled costs, not provider quotes or guaranteed savings.'}
-      </p>
+      {analysis?.status !== 'not_available' && (
+        <p className="insight-caption">
+          {humanizeCostCurveNote(analysis?.note || analysis?.reason) || 'These are modeled costs, not provider quotes or guaranteed savings.'}
+        </p>
+      )}
     </div>
   );
 }
 
-function HybridFlow({ hybrid }) {
-  if (!Array.isArray(hybrid?.nodes) || hybrid.nodes.length === 0) {
-    const reasons = Array.isArray(hybrid?.reasons) ? hybrid.reasons : [];
+function HybridFlow({ hybrid, workload, feasibility }) {
+  const localMemory = isRecord(hybrid?.local_memory) ? hybrid.local_memory : {};
+  const modelRam = localMemory.model_ram_required_mb ?? workload?.model_ram_required_mb;
+  const deviceRam = localMemory.device_available_ram_mb ?? workload?.device_available_ram_mb;
+  const hasKnownMemory = modelRam !== null && modelRam !== undefined
+    && deviceRam !== null && deviceRam !== undefined
+    && Number.isFinite(Number(modelRam)) && Number(modelRam) > 0
+    && Number.isFinite(Number(deviceRam)) && Number(deviceRam) > 0;
+  const memoryFits = hasKnownMemory && Number(modelRam) <= Number(deviceRam);
+  const onDeviceEligible = feasibility?.on_device?.eligible === true;
+  const remoteTier = normalizeTierKey(hybrid?.remote_analytics_tier);
+  const remoteTierEligible = remoteTier.length > 0
+    && feasibility?.[remoteTier]?.eligible === true;
+  const remoteTierAllowed = !Array.isArray(workload?.allowed_tiers)
+    || workload.allowed_tiers.includes(remoteTier);
+  const remotePolicyAllowsCandidate = workload?.allow_remote_processing === true
+    && workload?.require_offline !== true
+    && workload?.network_available !== false
+    && workload?.bandwidth_available_mbps !== 0
+    && remoteTierEligible
+    && remoteTierAllowed;
+  const candidateNodes = Array.isArray(hybrid?.nodes) ? hybrid.nodes : [];
+  const canShowCandidate = hybrid?.status === 'candidate_requires_validation'
+    && candidateNodes.length > 0
+    && memoryFits
+    && onDeviceEligible
+    && remotePolicyAllowsCandidate;
+
+  if (!canShowCandidate) {
+    const reasons = new Set(Array.isArray(hybrid?.reasons) ? hybrid.reasons : []);
+    if (!hasKnownMemory) {
+      reasons.add('Local model memory requirement and available device memory must be provided');
+    } else if (!memoryFits) {
+      reasons.add(`Local model requires ${Number(modelRam).toLocaleString()} MB RAM but device has ${Number(deviceRam).toLocaleString()} MB available`);
+    }
+    if (!onDeviceEligible) reasons.add('On-device stage is excluded by hard constraints');
+    if (workload?.allow_remote_processing !== true) {
+      reasons.add('Explicit allow_remote_processing=true is required to propose a hybrid split');
+    }
+    if (workload?.require_offline === true) reasons.add('Offline-only policy prohibits remote analytics');
+    if (workload?.network_available === false || workload?.bandwidth_available_mbps === 0) {
+      reasons.add('No available network path for the optional remote stage');
+    }
+    if (!remoteTierEligible || !remoteTierAllowed) reasons.add('No eligible remote analytics tier');
+    if (reasons.size === 0) reasons.add('The backend did not confirm a validated hybrid candidate.');
+    const plainReasons = [...reasons].map((reason) => {
+      if (reason.includes('allow_remote_processing=true')) return 'Remote processing is turned off in the Analyzer.';
+      if (reason.includes('Offline-only policy')) return 'This workload requires offline use, so remote analytics is not allowed.';
+      if (reason.includes('No available network path')) return 'No network connection is available for the optional remote step.';
+      if (reason.includes('On-device stage is excluded')) return 'A hard workload rule prevents the required on-device step.';
+      if (reason.includes('memory requirement and available device memory must be provided')) {
+        return 'Enter both the model memory needed and device memory available to check local fit.';
+      }
+      if (reason.includes('does not fit available device memory')) return 'The model needs more memory than the device has available.';
+      if (reason.includes('No eligible remote analytics tier')) return 'No remote option meets this workload’s hard constraints.';
+      return reason;
+    });
     return (
       <div className="hybrid-unavailable">
-        <span className="hybrid-status-orbit" aria-hidden="true">×</span>
         <div>
-          <strong>Hybrid path not proposed</strong>
-          {reasons.map((reason) => <p key={reason}>{reason}</p>)}
+          <strong>Hybrid diagram unavailable</strong>
+          <p>The inputs or service rules do not currently allow a safe local-plus-remote design.</p>
+          {plainReasons.map((reason) => <p key={reason}>{reason}</p>)}
         </div>
       </div>
     );
   }
-  const nodes = hybrid.nodes;
+  const nodes = candidateNodes;
   const connections = Array.isArray(hybrid.connections) ? hybrid.connections : [];
-  const critical = new Set(hybrid.critical_path || []);
-  const optional = new Set(hybrid.optional_remote_path || []);
+  const localNodes = nodes.filter((node) => node.type === 'device');
+  const remoteNodes = nodes.filter((node) => node.type === 'edge' || node.type === 'cloud');
+  const handoff = connections.find((edge) => (
+    localNodes.some((node) => node.id === edge.source)
+    && remoteNodes.some((node) => node.id === edge.target)
+  ));
+  const stepDescriptions = {
+    data_source: 'Workload data starts here.',
+    critical_inference: 'Time-sensitive AI work stays on the device.',
+    data_minimization: 'Filter results before anything is sent.',
+  };
+  const plainValidationChecks = (check) => {
+    if (check.startsWith('Validate that local inference')) {
+      return 'Confirm the model runs on the target device; enough memory alone does not prove compatibility.';
+    }
+    if (check.startsWith('Validate that only permitted, minimized data')) {
+      return 'Confirm only allowed, minimized information leaves the device; do not assume anonymization is perfect.';
+    }
+    if (check.startsWith('Measure data-transfer')) {
+      return 'Measure transfer time, optional analysis delay, and total operating cost.';
+    }
+    if (check.startsWith('Verify encrypted communication')) {
+      return 'Before launch, check encryption, access rules, data location, and consent.';
+    }
+    if (check.startsWith('Validate remote service failure handling')) {
+      return 'Make sure critical local decisions still work if the remote service fails.';
+    }
+    if (check.startsWith('High privacy:')) {
+      return 'For this high-privacy workload, confirm which fields may be sent and the legal basis for sending them.';
+    }
+    return check;
+  };
 
   return (
     <>
-      <div className="hybrid-flow" role="img" aria-label="Proposed hybrid architecture flow from local device processing to optional remote analytics">
-        {nodes.map((node, index) => {
-          const next = nodes[index + 1];
-          const connection = connections.find((edge) => edge.source === node.id && edge.target === next?.id);
-          const isCritical = critical.has(node.id);
-          const isOptional = optional.has(node.id);
-          return (
-            <div className="hybrid-flow-step" key={node.id}>
-              <div className={`hybrid-node ${isCritical ? 'is-critical' : ''} ${isOptional ? 'is-optional' : ''}`}>
-                <span className="hybrid-node-glyph" aria-hidden="true">
-                  {node.type === 'cloud' ? '☁' : node.type === 'edge' ? '⌁' : '▣'}
+      <div className="hybrid-simple-flow" role="group" aria-label="Hybrid processing keeps the main AI decision local and sends only approved summaries for optional remote analysis">
+        <section className="hybrid-simple-stage is-local">
+          <span>Proposed · on-device processing</span>
+          <ol>
+            {localNodes.map((node, index) => (
+              <li key={node.id}>
+                <i aria-hidden="true">{index + 1}</i>
+                <span>
+                  <strong>{node.role === 'data_source' ? 'Input' : node.role === 'critical_inference' ? 'AI decision' : 'Filter'}</strong>
+                  <small>{stepDescriptions[node.role] || 'This step stays on the device.'}</small>
                 </span>
-                <strong>{node.label}</strong>
-                <small>{String(node.role || '').replaceAll('_', ' ')}</small>
-              </div>
-              {next && (
-                <div className={`hybrid-connector ${connection ? 'has-connection' : ''}`}>
-                  <i aria-hidden="true">→</i>
-                  {connection?.data && <small>{connection.data}</small>}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      <div className="hybrid-legend">
-        <span><i className="is-critical" /> Critical local path</span>
-        <span><i className="is-optional" /> Optional remote path</span>
-        {hybrid.remote_analytics_tier && <strong>Remote: {formatTierName(hybrid.remote_analytics_tier)}</strong>}
+              </li>
+            ))}
+          </ol>
+          <div className="hybrid-memory-check" role="status">
+            <strong>Local RAM fit: confirmed</strong>
+            <span>
+              Model requires {Number(modelRam).toLocaleString()} MB; device has {Number(deviceRam).toLocaleString()} MB available.
+            </span>
+          </div>
+        </section>
+        <div className="hybrid-simple-handoff">
+          <span>Optional transfer</span>
+          <strong>{handoff?.data === 'approved summaries only'
+            ? 'Only approved summaries leave the device.'
+            : handoff?.data || 'Only permitted information is sent.'}</strong>
+          <i aria-hidden="true">→</i>
+        </div>
+        <section className="hybrid-simple-stage is-remote">
+          <span>Optional · {formatTierName(hybrid.remote_analytics_tier || remoteNodes[0]?.label || 'Remote tier')}</span>
+          <strong>{remoteNodes[0]?.label || 'Remote analysis'}</strong>
+          <p>Extra analysis can happen here. It is not needed for the immediate on-device decision.</p>
+        </section>
       </div>
       {Array.isArray(hybrid.validation_checks) && hybrid.validation_checks.length > 0 && (
         <details className="hybrid-checks">
-          <summary>Validation checklist <span>{hybrid.validation_checks.length} checks</span></summary>
-          <ul>{hybrid.validation_checks.map((check) => <li key={check}>{check}</li>)}</ul>
+          <summary>What must be checked before use <span>{hybrid.validation_checks.length} items</span></summary>
+          <ul>{hybrid.validation_checks.map((check) => <li key={check}>{plainValidationChecks(check)}</li>)}</ul>
         </details>
       )}
-      <p className="insight-caption">{hybrid.basis || 'Candidate architecture only; it is not a fifth deployment tier.'}</p>
+      <p className="insight-caption">
+        This is a possible design, not a deployment recommendation. Check device fit, privacy, network, reliability, and total cost before using it.
+      </p>
     </>
   );
 }
@@ -1487,13 +1787,39 @@ function Results({
     setScenarioDeviceRam(baselineDeviceRam == null ? '' : String(baselineDeviceRam));
   }, [baselineLatency, baselinePrivacy, baselineNetworkAvailable, baselineDeviceRam]);
   useEffect(() => {
+    let active = true;
     setCounterfactualData(null);
     setCounterfactualError('');
     setCounterfactualTarget('');
     setOptimizationData(null);
     setOptimizationError('');
+    setOptimizationLoading(false);
     setSelectedCounterfactual(0);
-  }, [resultData]);
+
+    if (resultSource === 'live' && reportWorkload) {
+      setOptimizationLoading(true);
+      getOptimization(reportWorkload)
+        .then((responseData) => {
+          if (active) setOptimizationData(responseData);
+        })
+        .catch((requestError) => {
+          if (active) {
+            setOptimizationError(
+              requestError instanceof Error && requestError.message
+                ? requestError.message
+                : 'Optimization analysis failed.',
+            );
+          }
+        })
+        .finally(() => {
+          if (active) setOptimizationLoading(false);
+        });
+    }
+
+    return () => {
+      active = false;
+    };
+  }, [resultData, resultSource, reportWorkload]);
   const hasResult = resultSource !== null;
   const hasLiveResult = resultSource === 'live';
   const result = isRecord(resultData)
@@ -1542,6 +1868,10 @@ function Results({
   const changedInputs = Array.isArray(comparison?.changed_inputs)
     ? comparison.changed_inputs.filter((item) => isRecord(item) && typeof item.field === 'string')
     : null;
+  const displayedWorkload = { ...(isRecord(reportWorkload) ? reportWorkload : {}) };
+  changedInputs?.forEach(({ field, after }) => {
+    displayedWorkload[field] = after;
+  });
   const metricsHandling = isRecord(comparison?.metrics_handling)
     ? comparison.metrics_handling
     : null;
@@ -1590,13 +1920,13 @@ function Results({
       ? `${formatComparisonTier(comparison?.original_tier)} → ${formatTierName(highestScoredEligibleTier)} has the highest returned score among eligible tiers. This is a provisional comparison, not a final recommendation.`
       : hasNoScenarioRecommendation
         ? 'The backend did not return a deployment recommendation for this scenario.'
-    : comparison?.recommendation_changed === true && hasScenarioTier
-      ? `The leading tier changed from ${formatComparisonTier(comparison.original_tier)} to ${formatComparisonTier(comparison.new_tier)}.`
-      : comparison?.recommendation_changed === false && hasScenarioTier
-        ? `The leading tier stayed at ${formatTierName(comparison.new_tier)}.`
-        : typeof comparison?.explanation === 'string'
-          ? comparison.explanation
-          : 'Scenario result unavailable.';
+        : comparison?.recommendation_changed === true && hasScenarioTier
+          ? `The leading tier changed from ${formatComparisonTier(comparison.original_tier)} to ${formatComparisonTier(comparison.new_tier)}.`
+          : comparison?.recommendation_changed === false && hasScenarioTier
+            ? `The leading tier stayed at ${formatTierName(comparison.new_tier)}.`
+            : typeof comparison?.explanation === 'string'
+              ? comparison.explanation
+              : 'Scenario result unavailable.';
   const formatScore = (value) => (
     value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
       ? Number(value).toLocaleString(undefined, { maximumFractionDigits: 1 })
@@ -1629,6 +1959,14 @@ function Results({
   const counterfactualFields = [
     'latency_requirement_ms',
     'privacy_requirement',
+    'bandwidth_requirement',
+    'budget_monthly',
+    'criticality',
+    'concurrent_users',
+    'require_offline',
+    'allow_remote_processing',
+    'network_available',
+    'bandwidth_available_mbps',
     ...(hasModelRamRequirement ? ['device_available_ram_mb'] : []),
   ];
   const counterfactualFlips = Array.isArray(counterfactualData?.flips)
@@ -1684,6 +2022,13 @@ function Results({
       ? values[0] || ''
       : `${values.slice(0, -1).join(', ')} or ${values[values.length - 1]}`
   );
+  const notesRecommendation = hasSimulation
+    ? (typeof currentResult.recommended_tier === 'string'
+      ? currentResult.recommended_tier
+      : typeof currentResult.recommendation === 'string'
+        ? currentResult.recommendation
+        : null)
+    : recommendation;
 
   async function runCounterfactuals() {
     if (!reportWorkload || !hasLiveResult) return;
@@ -1790,16 +2135,9 @@ function Results({
                 scores={scores}
                 hasResult={hasResult}
                 resultSource={resultSource}
+                workload={reportWorkload}
+                workloadLabel={hasSimulation ? 'Baseline inputs for this recommendation' : undefined}
               />
-              <p className="rationale">
-                {typeof result.explanation === 'string' && result.explanation
-                  ? result.explanation
-                  : typeof result.rationale === 'string' && result.rationale
-                    ? result.rationale
-                    : typeof result.reasoning === 'string' && result.reasoning
-                      ? result.reasoning
-                      : 'The service did not provide a rationale.'}
-              </p>
               <div className="estimate-grid">
                 <div>
                   <span>Latency estimate</span>
@@ -1938,13 +2276,13 @@ function Results({
                       ? 'No feasible deployment tier'
                       : highestScoredEligibleTier
                         ? 'Highest-scoring eligible tier (provisional)'
-                      : hasNoScenarioRecommendation
-                        ? 'No recommendation selected'
-                      : comparison?.recommendation_changed === true
-                        ? 'The leading tier changed.'
-                        : comparison?.recommendation_changed === false
-                          ? 'The leading tier stayed the same.'
-                          : 'Scenario result unavailable.'}
+                        : hasNoScenarioRecommendation
+                          ? 'No recommendation selected'
+                          : comparison?.recommendation_changed === true
+                            ? 'The leading tier changed.'
+                            : comparison?.recommendation_changed === false
+                              ? 'The leading tier stayed the same.'
+                              : 'Scenario result unavailable.'}
                   </h2>
                 </div>
                 <span>
@@ -1954,32 +2292,31 @@ function Results({
                     ? 'No feasible tier'
                     : highestScoredEligibleTier
                       ? `${formatTierName(highestScoredEligibleTier)} · highest score`
-                    : hasNoScenarioRecommendation
-                      ? 'No recommendation'
-                    : hasScenarioTier
-                      ? formatTierName(comparison.new_tier)
-                      : formatComparisonTier(comparison?.new_tier)}
+                      : hasNoScenarioRecommendation
+                        ? 'No recommendation'
+                        : hasScenarioTier
+                          ? formatTierName(comparison.new_tier)
+                          : formatComparisonTier(comparison?.new_tier)}
                 </span>
               </div>
               <p>{scenarioResultMessage}</p>
-              <p className={`scenario-feasibility ${
-                hasNoFeasibleScenarioTier
+              <p className={`scenario-feasibility ${hasNoFeasibleScenarioTier
                   ? 'is-infeasible'
                   : hasNoScenarioRecommendation
                     ? 'is-unavailable'
                     : ''
-              }`}>
+                }`}>
                 {hasNoFeasibleScenarioTier
                   ? 'Feasibility: no feasible tier.'
                   : highestScoredEligibleTier
-                    ? `Highest eligible score: ${formatTierName(highestScoredEligibleTier)}. This is not a backend recommendation.`
-                  : hasNoScenarioRecommendation && hasFeasibleScenarioOption
-                    ? 'Some tiers pass hard feasibility checks, but there is not enough scenario evidence to select a winner.'
-                    : hasNoScenarioRecommendation
-                      ? 'Scenario feasibility could not be determined from the returned details.'
-                  : hasScenarioTier
-                    ? `Feasible scenario recommendation: ${formatTierName(comparison.new_tier)}.`
-                    : 'Scenario feasibility unavailable.'}
+                    ? `Highest eligible score: ${formatTierName(highestScoredEligibleTier)}.`
+                    : hasNoScenarioRecommendation && hasFeasibleScenarioOption
+                      ? 'Some tiers pass hard feasibility checks, but there is not enough scenario evidence to select a winner.'
+                      : hasNoScenarioRecommendation
+                        ? 'Scenario feasibility could not be determined from the returned details.'
+                        : hasScenarioTier
+                          ? `Feasible scenario recommendation: ${formatTierName(comparison.new_tier)}.`
+                          : 'Scenario feasibility unavailable.'}
               </p>
               <div className="scenario-changes">
                 <h3>Changed inputs</h3>
@@ -2073,7 +2410,9 @@ function Results({
                     <h3>What could change the winner?</h3>
                   </div>
                 </div>
-                <p className="insight-card-intro">Find sampled input changes that switch tiers or leave no tier feasible.</p>
+                <p className="insight-card-intro">
+                  Test latency, privacy, data-transfer need, budget, criticality, user load, network rules, remote permission, and available speed. Device RAM is tested when model RAM is supplied.
+                </p>
                 <div className="counterfactual-controls">
                   <label htmlFor="counterfactual-target">Look for a path to</label>
                   <select
@@ -2116,20 +2455,20 @@ function Results({
                               group.flips.map((item) => [JSON.stringify(item.to), item.to]),
                             ).values());
                             return (
-                            <button
-                              className={`counterfactual-path ${selectedCounterfactual === index ? 'is-selected' : ''}`}
-                              type="button"
-                              key={group.key}
-                              onClick={() => setSelectedCounterfactual(index)}
-                              aria-pressed={selectedCounterfactual === index}
-                            >
-                              <span>{formatTierName(flip.from_tier)}</span>
-                              <i aria-hidden="true">→</i>
-                              <strong>{formatTierName(flip.to_tier)}</strong>
-                              <small>
-                                {formatCounterfactualField(flip.field)} · {sampledValues.length} tested {sampledValues.length === 1 ? 'value' : 'values'}
-                              </small>
-                            </button>
+                              <button
+                                className={`counterfactual-path ${selectedCounterfactual === index ? 'is-selected' : ''}`}
+                                type="button"
+                                key={group.key}
+                                onClick={() => setSelectedCounterfactual(index)}
+                                aria-pressed={selectedCounterfactual === index}
+                              >
+                                <span>{formatTierName(flip.from_tier)}</span>
+                                <i aria-hidden="true">→</i>
+                                <strong>{formatTierName(flip.to_tier)}</strong>
+                                <small>
+                                  {formatCounterfactualField(flip.field)} · {sampledValues.length} tested {sampledValues.length === 1 ? 'value' : 'values'}
+                                </small>
+                              </button>
                             );
                           })}
                         </div>
@@ -2209,7 +2548,11 @@ function Results({
                   </div>
                   {optimization?.cost_break_even?.status && <span className="insight-status">{optimization.cost_break_even.status.replaceAll('_', ' ')}</span>}
                 </div>
-                {optimization?.cost_break_even ? (
+                {optimizationLoading && !optimization ? (
+                  <div className="insight-empty-visual is-compact" role="status">
+                    <span>Loading workload-matched cost analysis…</span>
+                  </div>
+                ) : optimization?.cost_break_even ? (
                   <BreakEvenVisual analysis={optimization.cost_break_even} feasibility={feasibility} />
                 ) : (
                   <div className="insight-unavailable">
@@ -2230,9 +2573,13 @@ function Results({
                 </div>
                 {optimization?.hybrid ? (
                   <>
-                    <HybridFlow hybrid={optimization.hybrid} />
+                    <HybridFlow
+                      hybrid={optimization.hybrid}
+                      workload={reportWorkload}
+                      feasibility={feasibility}
+                    />
                     <p className="insight-caption">
-                      Allow remote processing is {reportWorkload?.allow_remote_processing === true ? 'enabled' : 'disabled'}. Enabling it permits evaluation; it does not guarantee a hybrid proposal.
+                      Remote processing is {reportWorkload?.allow_remote_processing === true ? 'allowed' : 'not allowed'} by your setting. Allowing it only lets the service evaluate this option; it does not prove the design is safe or ready to deploy.
                     </p>
                   </>
                 ) : (
@@ -2263,10 +2610,43 @@ function Results({
               </article>
             </div>
           </section>
+          <div className="result-notes-heading">
+            <h2>How to read these notes</h2>
+            <p>
+              {hasSimulation
+                ? 'These service notes apply to the simulated workload in the scenario result below.'
+                : 'These service notes apply to the analyzed workload shown above.'}
+              Cautions describe limits in this result, trade-offs describe the selected tier, and assumptions describe how the model works.
+            </p>
+          </div>
           <div className="info-grid">
-            <InfoCard title="Warnings" items={currentResult.warnings} emptyMessage={hasSimulation ? 'Unavailable' : undefined} />
-            <InfoCard title="Trade-offs" items={currentResult.tradeoffs} emptyMessage={hasSimulation ? 'Unavailable' : undefined} />
-            <InfoCard title="Assumptions" items={currentResult.assumptions} emptyMessage={hasSimulation ? 'Unavailable' : undefined} />
+            <InfoCard
+              title="Warnings"
+              kind="warnings"
+              items={currentResult.warnings}
+              emptyMessage={hasSimulation ? 'Not returned for this simulation.' : undefined}
+              workload={displayedWorkload}
+              recommendation={notesRecommendation}
+              details={currentResult.details}
+            />
+            <InfoCard
+              title="Trade-offs"
+              kind="trade-offs"
+              items={currentResult.tradeoffs}
+              emptyMessage={hasSimulation ? 'Not returned for this simulation.' : undefined}
+              workload={displayedWorkload}
+              recommendation={notesRecommendation}
+              details={currentResult.details}
+            />
+            <InfoCard
+              title="Model assumptions"
+              kind="assumptions"
+              items={currentResult.assumptions}
+              emptyMessage={hasSimulation ? 'Not returned for this simulation.' : undefined}
+              workload={displayedWorkload}
+              recommendation={notesRecommendation}
+              details={currentResult.details}
+            />
           </div>
           <div className="result-actions">
             {hasLiveResult && (

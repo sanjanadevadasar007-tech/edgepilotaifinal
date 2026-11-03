@@ -6,6 +6,13 @@ const WORKLOAD_ALIASES = {
   budget: 'budget_monthly',
   privacy: 'privacy_requirement'
 };
+const COST_CURVE_MATCH_FIELDS = [
+  'application_type',
+  'model_name',
+  'target_device',
+  'runtime',
+  'precision'
+];
 
 function normalizeWorkload(workload) {
   if (!workload || typeof workload !== 'object' || Array.isArray(workload)) {
@@ -43,9 +50,18 @@ function costCurvesMatchWorkload(workload, costCurves) {
   const workloadMatch = costCurves && costCurves.workload_match;
   if (!workloadMatch || !workload || typeof workload !== 'object') return null;
 
-  return Object.entries(workloadMatch).every(([key, value]) => workload[key] === value)
-    ? costCurves
-    : null;
+  const normalizeIdentifier = (value) => (
+    typeof value === 'string' ? value.trim().toLowerCase() : null
+  );
+  const matches = COST_CURVE_MATCH_FIELDS.every((field) => {
+    const workloadValue = normalizeIdentifier(workload[field]);
+    const curveValue = normalizeIdentifier(workloadMatch[field]);
+    return workloadValue !== null && workloadValue.length > 0
+      && curveValue !== null && curveValue.length > 0
+      && workloadValue === curveValue;
+  });
+
+  return matches ? costCurves : null;
 }
 
 async function calculateSuitability(workload, { metricsByTier, costCurves, evidenceMode } = {}) {

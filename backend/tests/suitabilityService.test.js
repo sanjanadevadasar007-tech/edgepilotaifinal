@@ -3,7 +3,11 @@ jest.mock('../services/pythonEngineBridge', () => ({
 }));
 
 const { callTeamEngine } = require('../services/pythonEngineBridge');
-const { calculateSuitability, normalizeWorkload } = require('../services/suitabilityService');
+const {
+  calculateSuitability,
+  costCurvesMatchWorkload,
+  normalizeWorkload
+} = require('../services/suitabilityService');
 const { getMetricsForWorkload } = require('../services/stage3MetricService');
 
 describe('suitability service input contract', () => {
@@ -65,5 +69,22 @@ describe('suitability service input contract', () => {
 
     expect(result.metrics_by_tier).toHaveProperty('on_device');
     expect(result.evidence_mode).toBe('illustrative_estimates');
+  });
+
+  test('selects bundled cost curves when all workload identifiers match case-insensitively', () => {
+    const curves = getMetricsForWorkload().cost_curves;
+    const workload = Object.fromEntries(
+      Object.entries(curves.workload_match).map(([field, value]) => [field, ` ${value.toUpperCase()} `])
+    );
+
+    expect(costCurvesMatchWorkload(workload, curves)).toBe(curves);
+  });
+
+  test('does not select a cost curve profile when any required identifier differs or is missing', () => {
+    const curves = getMetricsForWorkload().cost_curves;
+    const workload = { ...curves.workload_match, runtime: 'ONNX Runtime' };
+
+    expect(costCurvesMatchWorkload(workload, curves)).toBeNull();
+    expect(costCurvesMatchWorkload({ ...curves.workload_match, precision: undefined }, curves)).toBeNull();
   });
 });

@@ -121,16 +121,26 @@ def hybrid_architecture(payload, recommendation):
     if not local.get("eligible", False):
         reasons.append("On-device stage is excluded by hard constraints")
     need, available = workload.get("model_ram_required_mb"), workload.get("device_available_ram_mb")
+    memory_fits = None
     if need is None or available is None:
         reasons.append("Local model memory requirement and available device memory must be provided")
     elif need > available:
         reasons.append("Local model does not fit available device memory")
+        memory_fits = False
+    else:
+        memory_fits = True
+    local_memory = {
+        "model_ram_required_mb": need,
+        "device_available_ram_mb": available,
+        "fits": memory_fits,
+    }
     candidates = [tier for tier in details.get("ranking", ())
                   if tier != "on_device" and details["feasibility"].get(tier, {}).get("eligible")]
     if not candidates:
         reasons.append("No eligible remote analytics tier")
     if reasons:
         return {"status": "not_proposed", "reasons": reasons, "nodes": [], "connections": [],
+                "local_memory": local_memory,
                 "note": "Hybrid is optional and separate from the required four-tier ranking."}
     remote = candidates[0]
     node_type = "cloud" if remote == "cloud" else "edge"
@@ -145,6 +155,7 @@ def hybrid_architecture(payload, recommendation):
         checks.append("High privacy: verify de-identification policy and legal basis for each transmitted field")
     return {
         "status": "candidate_requires_validation", "remote_analytics_tier": remote,
+        "local_memory": local_memory,
         "nodes": [
             {"id": "device", "label": "Source Device", "type": "device", "role": "data_source"},
             {"id": "local_inference", "label": "Local Time-Critical Inference", "type": "device", "role": "critical_inference"},

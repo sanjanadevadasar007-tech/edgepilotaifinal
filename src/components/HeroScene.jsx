@@ -31,7 +31,7 @@ const TIERS = [
   },
   {
     name: 'Regional Edge',
-    caption: 'Balanced · selected',
+    caption: 'Balanced · preview',
     detail: 'A regional fabric balancing latency, data locality, and scale.',
     context: 'Balances local responsiveness with broader shared capacity.',
     color: '#b397ff',
@@ -416,7 +416,7 @@ export default function HeroScene() {
         <span className="scene-coordinate scene-coordinate-a" aria-hidden="true">EDGE / 04</span>
       </section>
       <div className="scene-readout" aria-live="polite">
-        <span className="scene-readout-kicker">PLACEMENT SIGNAL / ILLUSTRATIVE</span>
+        <span className="scene-readout-kicker">ILLUSTRATIVE PREVIEW · NOT BASED ON YOUR WORKLOAD</span>
         <strong style={{ '--tier-color': activeTier.color }}>{activeTier.name}</strong>
         <p>{activeTier.detail}</p>
         <small>{activeTier.context}</small>
