@@ -1632,25 +1632,57 @@ function Results({
     ...(hasModelRamRequirement ? ['device_available_ram_mb'] : []),
   ];
   const counterfactualFlips = Array.isArray(counterfactualData?.flips)
-    ? counterfactualData.flips.filter(isRecord)
+    ? counterfactualData.flips.filter(
+      (flip) => isRecord(flip)
+        && typeof flip.to_tier === 'string'
+        && flip.to_tier.trim() !== '',
+    )
     : [];
-  const counterfactualTierSwitchCount = counterfactualFlips.filter(
-    (flip) => typeof flip.to_tier === 'string' && flip.to_tier.trim() !== '',
-  ).length;
-  const counterfactualNoFeasibleCount = counterfactualFlips.filter(
-    (flip) => flip.to_tier === null,
-  ).length;
-  const counterfactualUnavailableDestinationCount = counterfactualFlips.filter(
-    (flip) => flip.to_tier !== null
-      && (typeof flip.to_tier !== 'string' || flip.to_tier.trim() === ''),
-  ).length;
-  const selectedFlip = counterfactualFlips[selectedCounterfactual] || null;
-  const formatCounterfactualDestination = (tier) => (
-    tier === null
-      ? 'No feasible tier'
-      : typeof tier === 'string' && tier.trim()
-        ? formatTierName(tier)
-        : 'Destination unavailable'
+  const counterfactualGroups = Array.from(
+    counterfactualFlips.reduce((groups, flip) => {
+      const key = JSON.stringify([
+        flip.field,
+        normalizeTierKey(flip.from_tier),
+        normalizeTierKey(flip.to_tier),
+      ]);
+      const group = groups.get(key) || { key, flips: [] };
+      group.flips.push(flip);
+      groups.set(key, group);
+      return groups;
+    }, new Map()).values(),
+  );
+  const selectedCounterfactualGroup = counterfactualGroups[selectedCounterfactual] || null;
+  const selectedFlip = selectedCounterfactualGroup?.flips[0] || null;
+  const formatCounterfactualField = (field) => ({
+    latency_requirement_ms: 'Latency requirement',
+    budget_monthly: 'Monthly budget',
+    privacy_requirement: 'Privacy requirement',
+    criticality: 'Criticality',
+    device_available_ram_mb: 'Available device RAM',
+    model_ram_required_mb: 'Model RAM required',
+    network_available: 'Network availability',
+    allow_remote_processing: 'Remote processing permission',
+    bandwidth_available_mbps: 'Available network bandwidth',
+    minimum_network_bandwidth_mbps: 'Minimum network bandwidth',
+    concurrent_users: 'Concurrent users',
+    require_offline: 'Offline requirement',
+  }[field] || String(field || 'Input').replaceAll('_', ' '));
+  const formatCounterfactualValue = (field, value) => {
+    if (field === 'latency_requirement_ms') return `${formatScenarioValue(value)} ms`;
+    if (field === 'budget_monthly') return `₹${formatScenarioValue(value)} / month`;
+    if (field === 'device_available_ram_mb' || field === 'model_ram_required_mb') {
+      return `${formatScenarioValue(value)} MB`;
+    }
+    if (field === 'bandwidth_available_mbps' || field === 'minimum_network_bandwidth_mbps') {
+      return `${formatScenarioValue(value)} Mbps`;
+    }
+    if (field === 'concurrent_users') return `${formatScenarioValue(value)} users`;
+    return formatScenarioValue(value);
+  };
+  const joinCounterfactualValues = (values) => (
+    values.length < 2
+      ? values[0] || ''
+      : `${values.slice(0, -1).join(', ')} or ${values[values.length - 1]}`
   );
 
   async function runCounterfactuals() {
@@ -2067,54 +2099,68 @@ function Results({
                 {counterfactualData && (
                   <div className="counterfactual-output" aria-live="polite">
                     <div className="counterfactual-summary">
-                      <strong>{counterfactualData.candidate_flips_found ?? counterfactualFlips.length}</strong>
-                      <span>candidate outcomes found</span>
+                      <strong>{counterfactualGroups.length}</strong>
+                      <span>distinct tier-change paths</span>
                       <small>{counterfactualData.evaluations ?? 0} scenarios checked</small>
-                      <small>
-                        Returned: {counterfactualTierSwitchCount} tier switches · {counterfactualNoFeasibleCount} no-feasible results
-                      </small>
-                      {counterfactualUnavailableDestinationCount > 0 && (
-                        <small>{counterfactualUnavailableDestinationCount} destinations unavailable in response</small>
-                      )}
+                      <small>{counterfactualFlips.length} sampled inputs led to a tier change</small>
                       {counterfactualData.truncated === true && (
-                        <small>Showing {counterfactualFlips.length} returned outcomes; results were truncated.</small>
+                        <small>Showing returned tier changes; the backend truncated its results.</small>
                       )}
                     </div>
-                    {counterfactualFlips.length > 0 ? (
+                    {counterfactualGroups.length > 0 ? (
                       <>
                         <div className="counterfactual-path-list" role="list" aria-label="Possible changes">
-                          {counterfactualFlips.map((flip, index) => (
+                          {counterfactualGroups.map((group, index) => {
+                            const flip = group.flips[0];
+                            const sampledValues = Array.from(new Map(
+                              group.flips.map((item) => [JSON.stringify(item.to), item.to]),
+                            ).values());
+                            return (
                             <button
-                              className={`counterfactual-path ${selectedCounterfactual === index ? 'is-selected' : ''} ${flip.to_tier === null ? 'is-no-feasible' : ''}`}
+                              className={`counterfactual-path ${selectedCounterfactual === index ? 'is-selected' : ''}`}
                               type="button"
-                              key={`${flip.field}-${flip.to}-${index}`}
+                              key={group.key}
                               onClick={() => setSelectedCounterfactual(index)}
                               aria-pressed={selectedCounterfactual === index}
                             >
-                              <span>{formatComparisonTier(flip.from_tier)}</span>
+                              <span>{formatTierName(flip.from_tier)}</span>
                               <i aria-hidden="true">→</i>
-                              <strong>{formatCounterfactualDestination(flip.to_tier)}</strong>
-                              <small>{String(flip.field || '').replaceAll('_', ' ')}</small>
+                              <strong>{formatTierName(flip.to_tier)}</strong>
+                              <small>
+                                {formatCounterfactualField(flip.field)} · {sampledValues.length} tested {sampledValues.length === 1 ? 'value' : 'values'}
+                              </small>
                             </button>
-                          ))}
+                            );
+                          })}
                         </div>
-                        {selectedFlip && (
+                        {selectedFlip && selectedCounterfactualGroup && (
                           <div className="counterfactual-detail">
                             <div className="counterfactual-change-visual">
-                              <span>{String(selectedFlip.field || '').replaceAll('_', ' ')}</span>
-                              <strong>{formatScenarioValue(selectedFlip.from)} <i aria-hidden="true">→</i> {formatScenarioValue(selectedFlip.to)}</strong>
+                              <span>{formatCounterfactualField(selectedFlip.field)}</span>
+                              <strong>
+                                {formatCounterfactualValue(selectedFlip.field, selectedFlip.from)}
+                                <i aria-hidden="true">→</i>
+                                {joinCounterfactualValues(Array.from(new Map(
+                                  selectedCounterfactualGroup.flips.map((flip) => [
+                                    JSON.stringify(flip.to),
+                                    formatCounterfactualValue(flip.field, flip.to),
+                                  ]),
+                                ).values()))}
+                              </strong>
                             </div>
                             <p>
-                              {selectedFlip.description
-                                || (selectedFlip.to_tier === null
-                                  ? 'This sampled input change left no feasible deployment tier.'
-                                  : 'The backend did not return a scenario description.')}
+                              Starting from {formatCounterfactualValue(selectedFlip.field, selectedFlip.from)}, set {formatCounterfactualField(selectedFlip.field).toLowerCase()} to {joinCounterfactualValues(Array.from(new Map(
+                                selectedCounterfactualGroup.flips.map((flip) => [
+                                  JSON.stringify(flip.to),
+                                  formatCounterfactualValue(flip.field, flip.to),
+                                ]),
+                              ).values()))}. Each tested value made {formatTierName(selectedFlip.to_tier)} the leading tier.
                             </p>
                           </div>
                         )}
                       </>
                     ) : (
-                      <p className="insight-caption">No sampled input changes produced a different leading tier. Try a different target or input dimension.</p>
+                      <p className="insight-caption">No sampled input change switched to another feasible tier. Try a different target or input dimension.</p>
                     )}
                     {Array.isArray(counterfactualData.limitations) && counterfactualData.limitations.length > 0 && (
                       <details className="insight-footnote">
